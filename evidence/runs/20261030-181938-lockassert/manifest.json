@@ -1,0 +1,14 @@
+{
+  "name": "lockassert",
+  "cmd": [
+    "/bin/echo",
+    "hi"
+  ],
+  "rights": "0x0",
+  "exit": 127,
+  "seconds": 1.77,
+  "cgroup": "/sys/fs/cgroup/axaacr/lockassert",
+  "ledger": "/mnt/g/axiom-lsm/evidence/runs/20261030-181938-lockassert/ledger.img",
+  "pubkey": "610f64f50e12d38c27d09744bcc0956e2c394404c13b2fa99ebc2d4abd9232e2",
+  "note": "evidence = signed v3 ledger; verify with axiom-x-ledger-tool"
+}

@@ -1,0 +1,7 @@
+journal: clear
+superblock: copy A (generation 2), 2 records, 0 boots, 2 checkpoints archived, head f0552c685d1b94a6a46ef040f9f9e728973704da71cee0c89b425fcadfab3543
+hash chain: internally consistent from genesis, matches superblock head
+checkpoint signature: Valid
+checkpoint archive: 2 signed checkpoints verified; each is a prefix of the current chain
+  BOOT record #0: boot 0, 2026-10-30 22:19:40 (RTC, no time zone), resumed 0 records
+PASS: 2 records verified from genesis (1 BOOT records, 1 denies); latest and 2 archived checkpoints signed by 610f64f50e12d38c27d09744bcc0956e2c394404c13b2fa99ebc2d4abd9232e2
