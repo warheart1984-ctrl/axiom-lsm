@@ -2,3 +2,8 @@ axiom-lsm
 bpf/vmlinux.h
 bpf/lsm.bpf.o
 src/lsm.skel.h
+md2docx.py
+*.docx
+*.img
+*.key
+evidence/

@@ -17,7 +17,7 @@ src/lsm.skel.h: bpf/lsm.bpf.o
 	$(BPFTOOL) gen skeleton $< > $@
 
 axiom-lsm: src/loader.c src/lsm.skel.h
-	$(CC) -g -O2 -I src -o $@ src/loader.c -lbpf -lelf -lz
+	$(CC) -g -O2 -I src -o $@ src/loader.c -lbpf -lelf -lz -lcrypto
 
 clean:
 	rm -f bpf/lsm.bpf.o bpf/vmlinux.h src/lsm.skel.h axiom-lsm

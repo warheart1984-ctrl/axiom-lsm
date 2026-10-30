@@ -13,13 +13,13 @@ audit trail.
 
 - Kernel with `CONFIG_BPF_LSM=y` and `bpf` in the LSM list
   (`cat /sys/kernel/security/lsm` — WSL2's Microsoft kernel includes it)
-- `clang`, `bpftool`, `libbpf-dev`, `libelf-dev`, `zlib1g-dev`
+- `clang`, `bpftool`, `libbpf-dev`, `libelf-dev`, `zlib1g-dev`, `libssl-dev`
 - Root for load/attach (`CAP_SYS_ADMIN` + `CAP_BPF`)
 
 ## Build & use
 
 ```bash
-sudo mount -t securityfs securityfs /sys/kernel/security   # once per boot
+sudo mount -t bpf bpf /sys/fs/bpf      # once per boot (check: mountpoint /sys/fs/bpf)
 make
 sudo ./axiom-lsm attach        # hook live, objects pinned to /sys/fs/bpf/axiom-lsm/
 sudo ./axiom-lsm audit &       # stream denials + grants
@@ -29,16 +29,51 @@ sudo ./axiom-lsm run 0x10000 curl example.com # spawn a governed task
 sudo ./axiom-lsm detach                       # unload everything
 ```
 
+## Signed evidence — `record`
+
+`record` consumes the audit ring and appends each decision to an
+**Axiom-X format-v3 ledger disk image** — the identical 512-byte sector
+layout the kernel writes: hash-chained 96-byte records, journaled tail
+rewrites, Ed25519-signed checkpoints, and a disk-carried `AXIDENT1`
+signing identity in sector 259 (generated on first run, reread after).
+
+```bash
+sudo ./axiom-lsm record evidence/lsm-ledger.img   # checkpoint every 32; SIGINT for final
+# verify offline with the SAME tool that audits the kernel's disks:
+ledger-tool pubkey evidence/lsm-ledger.img
+ledger-tool verify evidence/lsm-ledger.img <pubkey>
+```
+
+Verified output (2026-10-30): `hash chain: internally consistent from
+genesis`, `checkpoint signature: Valid`, `6 signed checkpoints verified`,
+`PASS: 9 records verified from genesis (1 denies)`.
+
+Record kinds: `LSM_AUDIT` (107 — hook decision, `nr` = hook, `arg` =
+family/arg, `result` = 0/−EPERM) and `LSM_INHERIT` (108 — parent rights
+copied to child at `task_alloc`). `BOOT` (100) marks each daemon run;
+`tick` carries UNIX ms on LSM records. Only checkpointed records are
+durable — a daemon killed mid-window loses its un-checkpointed tail.
+
+## Operational warnings (learned the hard way)
+
+- **Stacked bpffs mounts**: `mount -t bpf` twice creates two instances —
+  pins on the hidden lower mount keep *old programs* enforcing with
+  unreachable maps (ALLOW + EPERM simultaneously). Check
+  `bpftool link list | grep -c lsm` == 2; fix by unmounting until the
+  count is right, remount once, reattach.
+- **The gate is INET-only by design**: gating `AF_NETLINK`/`AF_UNIX`
+  breaks `sudo` (PAM audit) and local IPC — a reference monitor that
+  mediates too much locks out its operators.
+- `attach` is **system-wide** default-deny for INET sockets while
+  attached; cgroup scoping is roadmap.
+
 ## Status
 
 | Piece | State |
 |-------|-------|
-| `socket_create` gate (Rights::NET) | `partial` — enforcement + ringbuf events |
-| Rights inheritance on fork/clone | `roadmap` (parent→child attenuation) |
-| More hooks (open/mmap/exec) | `roadmap` |
-| Daemon signing events into AX ledger records | `roadmap` (same `Record` format, `ledger-tool` verifies) |
-
-Root bypasses nothing — the hooks still fire; unlisted tasks simply
-deny. Security boundary note: this is deny-by-default for *unlisted*
-tasks; a task that can write the map (CAP_SYS_ADMIN) is trusted by
-design — same trust model as SELinux policy load.
+| `socket_create` gate (Rights::NET) | `enforced` — DENY/ALLOW evidenced |
+| Rights inheritance on fork (`lsm/task_alloc`) | `enforced` — INHERIT→ALLOW observed |
+| Daemon signing events into AX ledger records | `enforced` — `ledger-tool verify` PASS on live capture |
+| SCM_RIGHTS / connect / passed-fd bypass | **open** — creation mediated, receipt is not (see PAPER §3) |
+| More hooks (open/mmap/exec/ptrace) | `roadmap` |
+| Root/CAP_BPF detachment | trusted operator by design (see PAPER §3) |
