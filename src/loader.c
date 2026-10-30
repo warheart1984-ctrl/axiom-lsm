@@ -21,6 +21,10 @@
 #include <time.h>
 #include <sys/stat.h>
 #include <sys/prctl.h>
+#include <sys/syscall.h>
+#include <linux/seccomp.h>
+#include <linux/filter.h>
+#include <stddef.h>
 #include <dirent.h>
 #include <grp.h>
 #include <sys/wait.h>
@@ -277,13 +281,32 @@ static int do_run(const char *hex_s, char **cmd)
          * nobody) — a root agent could otherwise bpf() its own grant */
         const char *uid = getenv("AXIOM_UID");
         if (getenv("AXIOM_NODROP"))
-            goto exec;
+            goto exec;                      /* operator switch, documented */
         if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0))
             { perror("no_new_privs"); _exit(126); }
-        if (uid) {
-            __u64 u = strtoull(uid, NULL, 10);
+        if (uid || geteuid() == 0) {
+            /* governed children are unprivileged by default — bare
+             * `run` under sudo drops to nobody; AXIOM_UID overrides */
+            __u64 u = uid ? strtoull(uid, NULL, 10) : 65534;
             if (setgroups(0, NULL) || setgid((gid_t)u) || setuid((uid_t)u))
                 { perror("drop privs"); _exit(126); }
+        }
+        /* io_uring is an unmediated path — its network ops don't traverse
+         * socket_sendmsg. Deny the family per-task; seccomp survives exec
+         * and needs no privilege once no_new_privs is set. */
+        {
+            struct sock_filter ins[16];
+            struct sock_fprog pr = { 0, ins };
+            int deny[] = { 425, 426, 427 };  /* x86_64 io_uring_* */
+            ins[pr.len++] = (struct sock_filter)BPF_STMT(BPF_LD|BPF_W|BPF_ABS,
+                            offsetof(struct seccomp_data, nr));
+            for (unsigned i = 0; i < sizeof(deny)/sizeof(*deny); i++) {
+                ins[pr.len++] = (struct sock_filter)BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K, deny[i], 0, 1);
+                ins[pr.len++] = (struct sock_filter)BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_ERRNO|(EPERM & SECCOMP_RET_DATA));
+            }
+            ins[pr.len++] = (struct sock_filter)BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_ALLOW);
+            if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &pr))
+                { perror("seccomp io_uring"); _exit(126); }
         }
 exec:   execvp(cmd[0], cmd);
         dprintf(2, "[axiom-lsm] exec %s: %s\n", cmd[0], strerror(errno));

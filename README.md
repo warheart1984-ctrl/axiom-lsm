@@ -108,11 +108,17 @@ nobody) with `NO_NEW_PRIVS` + cleared supplementary groups before exec
 — verified: `CapEff 0`, uid 65534, `unshare -Ur` stays governed,
 cgroup.procs escape → PermissionError. A `hold` daemon pins the link
 fds so unlinking pins removes handles, not enforcement (root-agent
-detach attempt: 21 links survived). **Limit:** a governed task still
-at uid 0 can write its own pid into a parent cgroup.procs and leave
-scope (task_movegroup not exposed by BPF LSM on this kernel) — run
-dropped, which aacr does by default. `SCM_RIGHTS` file-fd passing
-confers write on an already-open fd (demonstrated; §4.4 limit).
+detach attempt: 21 links survived). Governed children also carry a
+per-task seccomp filter denying `io_uring_setup`/`enter`/`register`
+(x86_64) — io_uring network ops don't traverse `socket_sendmsg`, so
+the family is denied at syscall rather than left untested. `AXIOM_NODROP`
+is an explicit operator switch that skips the drop (documented, not
+a hidden bypass). **Limit:** a governed task still at uid 0 (e.g.
+`AXIOM_UID=0` for testing) can write its own pid into a parent
+cgroup.procs and leave scope — `task_movegroup` is not exposed by
+BPF LSM on this kernel; bare `run` now drops to nobody by default,
+closing it. `SCM_RIGHTS` file-fd passing confers write on an
+already-open fd (demonstrated; §4.4 limit).
 
 ## Status
 
