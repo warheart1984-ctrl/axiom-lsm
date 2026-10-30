@@ -102,9 +102,17 @@ sudo ./aacr run --rights 0x42E -- python3 agent.py    # no NET: EPERM, signed
 ```
 
 Agents cannot self-grant — `task_rights` is kernel task-storage; only
-the loader (map fd + pidfd) writes it, from the ungoverned parent.
-The containment contract is at the syscall boundary: framework,
-model, and language irrelevant.
+the loader (map fd + pidfd) writes it, and governed tasks get `-EPERM`
+on `bpf(2)` itself (hook 21). Children drop to `AXIOM_UID` (default
+nobody) with `NO_NEW_PRIVS` + cleared supplementary groups before exec
+— verified: `CapEff 0`, uid 65534, `unshare -Ur` stays governed,
+cgroup.procs escape → PermissionError. A `hold` daemon pins the link
+fds so unlinking pins removes handles, not enforcement (root-agent
+detach attempt: 21 links survived). **Limit:** a governed task still
+at uid 0 can write its own pid into a parent cgroup.procs and leave
+scope (task_movegroup not exposed by BPF LSM on this kernel) — run
+dropped, which aacr does by default. `SCM_RIGHTS` file-fd passing
+confers write on an already-open fd (demonstrated; §4.4 limit).
 
 ## Status
 

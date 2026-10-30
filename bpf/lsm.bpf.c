@@ -377,6 +377,36 @@ int BPF_PROG(axiom_ptrace_traceme, struct task_struct *parent)
 // task or the monitor itself. Self-signals (raise/abort) pass — a task
 // degrading itself is not an authority crossing — and kernel-origin
 // signals (si_code > 0, e.g. SIGCHLD to a parent) must stay free.
+// Governed tasks get no bpf(2) at all: the rights map is kernel
+// task-storage pinned at /sys/fs/bpf/axiom-lsm — a governed process
+// that could call bpf() could grant itself. Unconditional deny;
+// self-grant impossible means the syscall itself is unreachable.
+static __always_inline int governed_deny(__u32 hook, __u64 arg)
+{
+    int sc = scope_check();
+    if (sc < 0)
+        return 0;
+    __u64 *r = bpf_task_storage_get(&task_rights, bpf_get_current_task_btf(), 0, 0);
+    if (sc == 0 && !r)
+        return 0;
+    struct ev *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (e) {
+        e->tgid = (__u32)(bpf_get_current_pid_tgid() >> 32);
+        e->rights = r ? *r : 0;
+        e->arg = arg;
+        e->hook = hook;
+        e->kind = 1;
+        bpf_ringbuf_submit(e, 0);
+    }
+    return -EPERM;
+}
+
+SEC("lsm/bpf")
+int BPF_PROG(axiom_bpf, int cmd, union bpf_attr *attr, unsigned int size)
+{
+    return governed_deny(21, cmd);
+}
+
 SEC("lsm/task_kill")
 int BPF_PROG(axiom_task_kill, struct task_struct *p,
              struct kernel_siginfo *info, int sig, const struct cred *cred)

@@ -20,6 +20,9 @@
 #include <fcntl.h>
 #include <time.h>
 #include <sys/stat.h>
+#include <sys/prctl.h>
+#include <dirent.h>
+#include <grp.h>
 #include <sys/wait.h>
 #include <sys/random.h>
 #include <openssl/evp.h>
@@ -147,6 +150,8 @@ static int do_attach(const char *cgpath)
         fprintf(stderr, "warn: truncate link pin failed\n");
     if (bpf_link__pin(skel->links.axiom_mkdir, PIN_DIR "/link-mkdir"))
         fprintf(stderr, "warn: mkdir link pin failed\n");
+    if (bpf_link__pin(skel->links.axiom_bpf, PIN_DIR "/link-bpf"))
+        fprintf(stderr, "warn: bpf link pin failed\n");
     fprintf(stderr, "[axiom-lsm] attached; pins in %s\n", PIN_DIR);
     lsm_bpf__destroy(skel); /* skeleton frees; pinned objs stay live */
     return 0;
@@ -174,6 +179,7 @@ static int do_detach(void)
     unlink(PIN_DIR "/link-setattr");
     unlink(PIN_DIR "/link-truncate");
     unlink(PIN_DIR "/link-mkdir");
+    unlink(PIN_DIR "/link-bpf");
     unlink(PIN_DIR "/task_rights");
     unlink(PIN_DIR "/events");
     unlink(PIN_DIR "/scope_cgroups");
@@ -212,6 +218,27 @@ static int do_grant(const char *tgid_s, const char *hex_s)
     return 0;
 }
 
+/* Hold every link-* pin open so unlinking the pins can't kill
+ * enforcement — a governed task (or root) that removes the pin paths
+ * detaches nothing while a holder lives. */
+static int do_hold(void)
+{
+    DIR *d = opendir(PIN_DIR);
+    if (!d) { fprintf(stderr, "%s: %s\n", PIN_DIR, strerror(errno)); return 1; }
+    struct dirent *de;
+    int n = 0;
+    while ((de = readdir(d))) {
+        if (strncmp(de->d_name, "link-", 5)) continue;
+        char p[512]; snprintf(p, sizeof p, "%s/%s", PIN_DIR, de->d_name);
+        int fd = bpf_obj_get(p);
+        if (fd >= 0) n++;
+    }
+    closedir(d);
+    if (!n) { fprintf(stderr, "no links to hold — attach first\n"); return 1; }
+    fprintf(stderr, "[axiom-lsm] holding %d link fds (pins may be removed; enforcement stays)\n", n);
+    for (;;) pause();
+}
+
 static int do_audit(void)
 {
     int fd = pinned_map_fd("events");
@@ -245,7 +272,21 @@ static int do_run(const char *hex_s, char **cmd)
             _exit(126);
         }
         dprintf(2, "[axiom-lsm] task granted 0x%llx\n", (unsigned long long)rights);
-        execvp(cmd[0], cmd);
+        /* governed tasks never run privileged: no_new_privs kills the
+         * setuid/file-cap path back, then drop to AXIOM_UID (default
+         * nobody) — a root agent could otherwise bpf() its own grant */
+        const char *uid = getenv("AXIOM_UID");
+        if (getenv("AXIOM_NODROP"))
+            goto exec;
+        if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0))
+            { perror("no_new_privs"); _exit(126); }
+        if (uid) {
+            __u64 u = strtoull(uid, NULL, 10);
+            if (setgroups(0, NULL) || setgid((gid_t)u) || setuid((uid_t)u))
+                { perror("drop privs"); _exit(126); }
+        }
+exec:   execvp(cmd[0], cmd);
+        dprintf(2, "[axiom-lsm] exec %s: %s\n", cmd[0], strerror(errno));
         _exit(127);
     }
     if (cg) {
@@ -558,13 +599,14 @@ int main(int argc, char **argv)
 {
     if (argc < 2) {
         fprintf(stderr,
-            "usage: axiom-lsm attach [cgroup]|detach|grant <tgid> <hex>|run <hex> <cmd...>|audit|record <img> [every]\n");
+            "usage: axiom-lsm attach [cgroup]|detach|grant <tgid> <hex>|run <hex> <cmd...>|audit|record <img> [every]|hold\n");
         return 2;
     }
     if (!strcmp(argv[1], "attach")) return do_attach(argc > 2 ? argv[2] : NULL);
     if (!strcmp(argv[1], "detach")) return do_detach();
     if (!strcmp(argv[1], "grant") && argc == 4) return do_grant(argv[2], argv[3]);
     if (!strcmp(argv[1], "audit")) return do_audit();
+    if (!strcmp(argv[1], "hold")) return do_hold();
     if (!strcmp(argv[1], "run") && argc >= 4) return do_run(argv[2], &argv[3]);
     if (!strcmp(argv[1], "record") && argc >= 3) return do_record(argv[2], argc > 3 ? argv[3] : NULL);
     fprintf(stderr, "bad args\n");

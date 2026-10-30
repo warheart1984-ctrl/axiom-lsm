@@ -87,13 +87,34 @@ def run_one(args):
 
     # recorder drains the ringbuf into the signed v3 ledger for the run
     rec = subprocess.Popen([AXLSM, "record", img, "8"],
-                           stdout=open(os.devnull, "w"), stderr=subprocess.STDOUT)
-    time.sleep(1)  # recorder must provision the img before a fast exit
-    env = dict(os.environ, AXIOM_CGROUP=cg)
+                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                           text=True)
+    # handshake: wait for the recorder's ready line, not a guess — the
+    # img is provisioned once "recording to <img>" prints
+    t0 = time.time()
+    while time.time() - t0 < 10 and rec.poll() is None:
+        line = rec.stderr.readline()
+        if "recording to" in line or "resumed" in line or "provisioned" in line:
+            break
+    if rec.poll() is not None:
+        print("[aacr] recorder exited early:", rec.stderr.read()[-400:])
+        return 1
+    # fd holder: pin removal then removes handles, not enforcement —
+    # handshake on its ready line so detach can't win the race
+    hold = subprocess.Popen([AXLSM, "hold"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                            text=True)
+    t0 = time.time()
+    while time.time() - t0 < 10 and hold.poll() is None:
+        if "holding" in hold.stderr.readline():
+            break
+    env = dict(os.environ, AXIOM_CGROUP=cg,
+               AXIOM_UID=os.environ.get("AXIOM_UID", "65534"))
     t0 = time.time()
     proc = subprocess.run([AXLSM, "run", args.rights] + args.cmd, env=env)
     dt = time.time() - t0
 
+    hold.terminate()
     rec.send_signal(signal.SIGINT)
     rec.wait(timeout=15)
 
