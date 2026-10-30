@@ -26,7 +26,9 @@
 #define RIGHTS_READ (1ULL << 1)
 #define RIGHTS_WRITE (1ULL << 2)
 #define RIGHTS_EXECUTE (1ULL << 3)
+#define RIGHTS_RECV (1ULL << 8)
 #define RIGHTS_SPAWN (1ULL << 10)
+#define RIGHTS_KILL (1ULL << 11)
 
 // fmode bits (linux/fs.h macros — not in vmlinux.h)
 #define FMODE_READ 1
@@ -201,6 +203,80 @@ SEC("lsm/bprm_check_security")
 int BPF_PROG(axiom_bprm, struct linux_binprm *bprm)
 {
     return governed_gate(7, RIGHTS_EXECUTE, 0);
+}
+
+// Inbound authority — RECV is the counterpart of NET: bind/listen/accept
+// make a task *reachable*, which is new authority, not a byte arriving.
+// recvmsg is intentionally ungated: a reply to a petition you were
+// allowed to send confers no new authority, and gating it would break
+// every client. Governed-scoped like the other per-subject gates.
+static __always_inline int is_inet(struct socket *sock)
+{
+    int fam = inet_family_of(sock);
+    return fam == AF_INET || fam == AF_INET6;
+}
+
+SEC("lsm/socket_bind")
+int BPF_PROG(axiom_bind, struct socket *sock, struct sockaddr *address, int addrlen)
+{
+    if (!is_inet(sock))
+        return 0;
+    __u64 a = 0;
+    if (address && address->sa_family == AF_INET)
+        a = ((struct sockaddr_in *)address)->sin_port;
+    else if (address && address->sa_family == AF_INET6)
+        a = ((struct sockaddr_in6 *)address)->sin6_port;
+    return governed_gate(8, RIGHTS_RECV, a);
+}
+
+SEC("lsm/socket_listen")
+int BPF_PROG(axiom_listen, struct socket *sock, int backlog)
+{
+    if (!is_inet(sock))
+        return 0;
+    return governed_gate(9, RIGHTS_RECV, backlog);
+}
+
+SEC("lsm/socket_accept")
+int BPF_PROG(axiom_accept, struct socket *sock, struct socket *newsock)
+{
+    if (!is_inet(sock))
+        return 0;
+    return governed_gate(10, RIGHTS_RECV, 0);
+}
+
+// Namespace mutation: creating or deleting a name is WRITE authority on
+// the filesystem, not a side effect of open(2). inode_create firing
+// *before* file_open also closes the documented gap where a denied
+// O_CREAT still left an empty file behind.
+SEC("lsm/inode_create")
+int BPF_PROG(axiom_inode_create, struct inode *dir, struct dentry *dentry,
+             umode_t mode)
+{
+    return governed_gate(11, RIGHTS_WRITE, mode);
+}
+
+SEC("lsm/inode_unlink")
+int BPF_PROG(axiom_inode_unlink, struct inode *dir, struct dentry *dentry)
+{
+    return governed_gate(12, RIGHTS_WRITE, 0);
+}
+
+// ptrace(2): inspecting or steering another task is process-control
+// authority — and the natural way to hijack a *granted* task's rights.
+// Both directions gated: attaching (access_check) and volunteering to
+// be traced (traceme) — a governed task could otherwise let an
+// ungoverned accomplice drive it.
+SEC("lsm/ptrace_access_check")
+int BPF_PROG(axiom_ptrace_access, struct task_struct *child, unsigned int mode)
+{
+    return governed_gate(13, RIGHTS_KILL, mode);
+}
+
+SEC("lsm/ptrace_traceme")
+int BPF_PROG(axiom_ptrace_traceme, struct task_struct *parent)
+{
+    return governed_gate(14, RIGHTS_KILL, 0);
 }
 
 char LICENSE[] SEC("license") = "GPL";

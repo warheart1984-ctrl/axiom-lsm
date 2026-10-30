@@ -36,7 +36,8 @@ sudo ./axiom-lsm detach                       # unload everything
 ```
 
 Rights bits (shared with `axiom-x-capability`): `READ 0x2`, `WRITE 0x4`,
-`EXECUTE 0x8`, `ALLOC 0x20`, `SPAWN 0x400`, `NET 0x10000`. A governed
+`EXECUTE 0x8`, `ALLOC 0x20`, `RECV 0x100`, `SPAWN 0x400`, `KILL 0x800`,
+`NET 0x10000`. A governed
 task needs the right for each class it uses — e.g. `run 0x1042E` lets a
 program exec, read/write files, mmap, and use INET sockets; `run
 0x10000` gets a socket but fails its own `execve` (no `EXECUTE`).
@@ -87,7 +88,8 @@ durable — a daemon killed mid-window loses its un-checkpointed tail.
 | `socket_connect` + `socket_sendmsg` gates | `enforced` — passed-fd `connect` DENIED (hook 3, port audited) |
 | SCM_RIGHTS bypass | **closed** — mediation moved from creation to network action |
 | `file_open` (READ/WRITE), `mmap` (ALLOC), `bprm_check` (EXECUTE) | `enforced` — governed-scoped; DENY evidenced per class |
+| `bind`/`listen`/`accept` (RECV), `inode_create`+`unlink` (WRITE), `ptrace` both directions (KILL) | `enforced` — DENY evidenced per class |
 | Rights inheritance on fork (`lsm/task_alloc`) | `enforced` — INHERIT→ALLOW observed |
-| Daemon signing events into AX ledger records | `enforced` — `ledger-tool verify` PASS: 569 records, 7 denies, 12 signed checkpoints |
-| Receive-side (bind/accept/recvmsg), ptrace, inode-create | **open** — egress + governed classes only |
+| Daemon signing events into AX ledger records | `enforced` — `ledger-tool verify` PASS: 1415 records, 10 denies, 15 signed checkpoints |
+| Remaining surface | cgroup scoping, `recvmsg` (ungated by design — replies confer no new authority), rename/mkdir, DELEGATE narrowing |
 | Root/CAP_BPF detachment | trusted operator by design (see PAPER §3) |

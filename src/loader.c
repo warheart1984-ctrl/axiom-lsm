@@ -102,6 +102,20 @@ static int do_attach(void)
         fprintf(stderr, "warn: mmap link pin failed\n");
     if (bpf_link__pin(skel->links.axiom_bprm, PIN_DIR "/link-bprm"))
         fprintf(stderr, "warn: bprm link pin failed\n");
+    if (bpf_link__pin(skel->links.axiom_bind, PIN_DIR "/link-bind"))
+        fprintf(stderr, "warn: bind link pin failed\n");
+    if (bpf_link__pin(skel->links.axiom_listen, PIN_DIR "/link-listen"))
+        fprintf(stderr, "warn: listen link pin failed\n");
+    if (bpf_link__pin(skel->links.axiom_accept, PIN_DIR "/link-accept"))
+        fprintf(stderr, "warn: accept link pin failed\n");
+    if (bpf_link__pin(skel->links.axiom_inode_create, PIN_DIR "/link-inode_create"))
+        fprintf(stderr, "warn: inode_create link pin failed\n");
+    if (bpf_link__pin(skel->links.axiom_inode_unlink, PIN_DIR "/link-inode_unlink"))
+        fprintf(stderr, "warn: inode_unlink link pin failed\n");
+    if (bpf_link__pin(skel->links.axiom_ptrace_access, PIN_DIR "/link-ptrace_access"))
+        fprintf(stderr, "warn: ptrace_access link pin failed\n");
+    if (bpf_link__pin(skel->links.axiom_ptrace_traceme, PIN_DIR "/link-ptrace_traceme"))
+        fprintf(stderr, "warn: ptrace_traceme link pin failed\n");
     fprintf(stderr, "[axiom-lsm] attached; pins in %s\n", PIN_DIR);
     lsm_bpf__destroy(skel); /* skeleton frees; pinned objs stay live */
     return 0;
@@ -116,6 +130,13 @@ static int do_detach(void)
     unlink(PIN_DIR "/link-file_open");
     unlink(PIN_DIR "/link-mmap");
     unlink(PIN_DIR "/link-bprm");
+    unlink(PIN_DIR "/link-bind");
+    unlink(PIN_DIR "/link-listen");
+    unlink(PIN_DIR "/link-accept");
+    unlink(PIN_DIR "/link-inode_create");
+    unlink(PIN_DIR "/link-inode_unlink");
+    unlink(PIN_DIR "/link-ptrace_access");
+    unlink(PIN_DIR "/link-ptrace_traceme");
     unlink(PIN_DIR "/task_rights");
     unlink(PIN_DIR "/events");
     rmdir(PIN_DIR);
