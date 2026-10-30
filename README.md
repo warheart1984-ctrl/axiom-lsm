@@ -72,8 +72,10 @@ durable — a daemon killed mid-window loses its un-checkpointed tail.
 | Piece | State |
 |-------|-------|
 | `socket_create` gate (Rights::NET) | `enforced` — DENY/ALLOW evidenced |
+| `socket_connect` + `socket_sendmsg` gates | `enforced` — passed-fd `connect` DENIED (hook 3, port audited) |
+| SCM_RIGHTS bypass | **closed** — mediation moved from creation to network action |
 | Rights inheritance on fork (`lsm/task_alloc`) | `enforced` — INHERIT→ALLOW observed |
 | Daemon signing events into AX ledger records | `enforced` — `ledger-tool verify` PASS on live capture |
-| SCM_RIGHTS / connect / passed-fd bypass | **open** — creation mediated, receipt is not (see PAPER §3) |
+| Receive-side (bind/accept/recvmsg) | **open** — egress only by design, see PAPER §3 |
 | More hooks (open/mmap/exec/ptrace) | `roadmap` |
 | Root/CAP_BPF detachment | trusted operator by design (see PAPER §3) |

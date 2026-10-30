@@ -108,4 +108,47 @@ int BPF_PROG(axiom_socket_create, int family, int type, int protocol, int kern)
     return gate(1, RIGHTS_NET, family);
 }
 
+// Socket family via CO-RE: a passed fd (SCM_RIGHTS) lets a denied task skip
+// socket_create entirely, so creation alone isn't the boundary — action is.
+static __always_inline int inet_family_of(struct socket *sock)
+{
+    struct sock *sk = sock->sk;
+    if (!sk)
+        return 0;
+    return sk->__sk_common.skc_family;
+}
+
+// connect(2): closing the SCM_RIGHTS bypass. A denied task holding a passed
+// fd can call connect/send on it — gating action (not just creation) is the
+// difference between a firewall and a mediation boundary.
+SEC("lsm/socket_connect")
+int BPF_PROG(axiom_socket_connect, struct socket *sock,
+             struct sockaddr *address, int addrlen)
+{
+    int fam = inet_family_of(sock);
+    if (fam != AF_INET && fam != AF_INET6)
+        return 0;
+    __u64 a = fam;
+    if (address) {
+        if (fam == AF_INET)
+            a = ((struct sockaddr_in *)address)->sin_port;
+        else if (fam == AF_INET6)
+            a = ((struct sockaddr_in6 *)address)->sin6_port;
+    }
+    return gate(3, RIGHTS_NET, a);
+}
+
+// sendmsg(2)/send(2)/write(2): UDP tasks can reach arbitrary destinations
+// without ever calling connect — gate the send path too, or the connect
+// hook is decorative. arg = socket family (msg_name may be NULL).
+SEC("lsm/socket_sendmsg")
+int BPF_PROG(axiom_socket_sendmsg, struct socket *sock,
+             struct msghdr *msg, int size)
+{
+    int fam = inet_family_of(sock);
+    if (fam != AF_INET && fam != AF_INET6)
+        return 0;
+    return gate(4, RIGHTS_NET, fam);
+}
+
 char LICENSE[] SEC("license") = "GPL";

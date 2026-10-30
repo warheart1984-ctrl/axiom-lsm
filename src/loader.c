@@ -92,6 +92,10 @@ static int do_attach(void)
         fprintf(stderr, "warn: link pin failed — detach won't find it\n");
     if (bpf_link__pin(skel->links.axiom_task_alloc, PIN_DIR "/link-fork"))
         fprintf(stderr, "warn: fork link pin failed\n");
+    if (bpf_link__pin(skel->links.axiom_socket_connect, PIN_DIR "/link-connect"))
+        fprintf(stderr, "warn: connect link pin failed\n");
+    if (bpf_link__pin(skel->links.axiom_socket_sendmsg, PIN_DIR "/link-sendmsg"))
+        fprintf(stderr, "warn: sendmsg link pin failed\n");
     fprintf(stderr, "[axiom-lsm] attached; pins in %s\n", PIN_DIR);
     lsm_bpf__destroy(skel); /* skeleton frees; pinned objs stay live */
     return 0;
@@ -101,6 +105,8 @@ static int do_detach(void)
 {
     unlink(PIN_DIR "/link-socket_create");
     unlink(PIN_DIR "/link-fork");
+    unlink(PIN_DIR "/link-connect");
+    unlink(PIN_DIR "/link-sendmsg");
     unlink(PIN_DIR "/task_rights");
     unlink(PIN_DIR "/events");
     rmdir(PIN_DIR);

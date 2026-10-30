@@ -4,7 +4,7 @@ Jon Halstead
 Independent — Boyne Falls, Michigan
 warheart1984-ctrl
 
-*v0.4 — v0.2 added threat model and scope corrections; v0.4 adds the signed-evidence daemon*
+*v0.5 — v0.2 added threat model and scope corrections; v0.4 the signed-evidence daemon; v0.5 closes the SCM_RIGHTS bypass*
 
 ## Abstract
 
@@ -49,7 +49,7 @@ Two security properties follow:
 |---|---|---|
 | Form | Rust x86_64 kernel | BPF LSM programs + userspace loader |
 | Environment | QEMU guest | Stock Linux kernel (BPF LSM) |
-| Enforcement | Syscall dispatch: `required_right(nr)` | `lsm/socket_create` hook |
+| Enforcement | Syscall dispatch: `required_right(nr)` | `lsm/socket_create` + `connect` + `sendmsg` hooks |
 | Rights | Kernel-owned per-process bitmask | `BPF_MAP_TYPE_TASK_STORAGE` per task struct |
 | Evidence | On-disk hash-chained ledger, signed checkpoints | Ring-buffer event stream (ledgered by a daemon — roadmap) |
 | Status | Evidence-bound development history | First enforcement point, working |
@@ -69,7 +69,7 @@ The kernel exercised the model — which invariants hold, which mechanisms leak 
 
 ### 2.3 axiom-lsm (the port)
 
-- `lsm/socket_create` program: gates `AF_INET`/`AF_INET6` only — local IPC (`AF_UNIX`, `AF_NETLINK`) passes free. Lesson learned the hard way: gating local sockets breaks `sudo`'s audit channel and locks out the operator.
+- `lsm/socket_create`, `lsm/socket_connect`, `lsm/socket_sendmsg` programs: gate `AF_INET`/`AF_INET6` only — local IPC (`AF_UNIX`, `AF_NETLINK`) passes free. Lesson learned the hard way: gating local sockets breaks `sudo`'s audit channel and locks out the operator. Creation is gated *and* action is gated, so a passed fd confers nothing.
 - `task_rights` is `BPF_MAP_TYPE_TASK_STORAGE`: per-task-struct storage updated from userspace via `pidfd`. Chosen after PID namespaces made tgid-keyed maps unreliable (§4.3).
 - `lsm/task_alloc` hook: copies the parent's rights to the child's task storage at fork. This is a **plain copy bounded above by the parent** — a child can never hold rights the parent lacked, so no amplification is possible. It is *not* yet the kernel's stronger model: Axiom-X requires `DELEGATE` to grant a nonempty mask and supports narrowing at spawn; the LSM's inheritance neither narrows nor checks `DELEGATE`. The weaker form is intentional for v0 (it matches POSIX fork semantics — a forked child *is* the parent); attenuation-by-narrowing belongs to the spawn/delegation API in future work.
 - Ring-buffer audit stream: every decision emits `{tgid, rights, arg, hook, kind}` where kind ∈ {ALLOW, DENY, INHERIT}.
@@ -98,11 +98,11 @@ Anderson's reference monitor requires three properties. We claim each only to th
 
 **Scope.** `attach` is **system-wide, not scoped to a governed set**: while attached, *every* task on the host that lacks a `task_rights` entry is denied `AF_INET`/`AF_INET6` socket creation. That is the intended default-deny posture — but it means attachment is itself a privileged policy act, and a production deployment would scope enforcement to a cgroup or labeled set rather than the whole system.
 
-**Known bypasses (stated, not fixed):**
+**Bypasses — closed and open:**
 
-- **`SCM_RIGHTS` fd-passing**: `socket_create` mediates *creation*, not receipt. A permitted task can create an INET socket and pass the fd to a denied task over `AF_UNIX`; the denied task can then `connect`/`send` on it. Closing this requires mediating fd receipt (`socket_recvmsg`/`inode` security hooks) or `connect`/`bind`/`sendmsg` directly — roadmap, §7.
-- **`connect`/`bind`/`sendmsg` are unmediated**: the gate is at object creation only.
-- **`AF_UNIX` sockets are unmediated by design** (operator escape hatch) — which is precisely what makes the `SCM_RIGHTS` path reachable.
+- **`SCM_RIGHTS` fd-passing — CLOSED (v0.5).** `socket_create` alone mediated *creation*, not receipt: a permitted task could pass an INET fd to a denied task over `AF_UNIX`, and the denied task could `connect`/`send` on it. The gate now also mediates `socket_connect` (hook 3, destination port audited) and `socket_sendmsg` (hook 4 — required because UDP reaches arbitrary destinations without `connect`). Demonstrated: granted task passes a live socket to an ungranted task; the ungranted task's `connect` on the passed fd returns `-EPERM` and lands a signed DENY record (`tgid 6324 rights 0x0 hook 3 arg 2304 -> DENY`, port 9 network-order). The mediation boundary moved from *object creation* to *network action*.
+- **Inbound paths are unmediated**: `bind`/`listen`/`accept`/`recvmsg` are not gated — the model governs *egress*, not listening. A denied task can still hold a bound INET socket via a passed fd; incoming connections on it are not currently denied (the send path is, so no data leaves — but `sendmsg` on a *connected-but-passed* socket is now denied too, so the residual is receive-only).
+- **`AF_UNIX` sockets are unmediated by design** (operator escape hatch).
 
 ## 4 Evaluation
 
@@ -126,7 +126,8 @@ Anderson's reference monitor requires three properties. We claim each only to th
 | `socket()` under `run 0x10000` | allowed | `[axiom-lsm] task granted 0x10000` / `socket ok` |
 | Forked child of granted task | inherits, allowed | `[audit] tgid 2277 rights 0x10000 hook 2 arg 18874368 -> INHERIT` then `tgid 2278 rights 0x10000 hook 1 arg 2 -> ALLOW`; `child socket ok` |
 | Non-INET sockets | unaffected | `sudo` and local IPC unaffected |
-| LSM decisions become signed evidence | `record` daemon → v3 image → `ledger-tool verify` | `hash chain: internally consistent from genesis`; `checkpoint signature: Valid`; `6 signed checkpoints verified`; `PASS: 9 records verified from genesis (1 denies)` |
+| LSM decisions become signed evidence | `record` daemon → v3 image → `ledger-tool verify` | `hash chain: internally consistent from genesis`; `checkpoint signature: Valid`; `8 signed checkpoints verified`; `PASS: 12 records verified from genesis (2 denies)` |
+| `SCM_RIGHTS` bypass attempt | `-EPERM` at `connect` on the passed fd | `[audit] tgid 6324 rights 0x0 hook 3 arg 2304 -> DENY`; `denied: [Errno 1] Operation not permitted` |
 
 ### 4.3 The honest frictions (debugging as evidence)
 
@@ -145,8 +146,8 @@ Anderson's reference monitor requires three properties. We claim each only to th
 ### 4.4 What is *not* yet proven
 
 - Records are durable only after a checkpoint: a daemon killed mid-window loses its un-checkpointed tail (provisional records are dropped on resume — by design, matching the kernel's signed-prefix semantics).
-- The `SCM_RIGHTS` fd-passing bypass and unmediated `connect`/`bind`/`sendmsg` (§3) mean the LSM currently gates socket *creation*, not network *access*. A denied task holding a passed fd has egress.
-- The LSM gates one hook. `execve`, `open`, `mmap`, `ptrace` are unmediated.
+- Receive-side paths (`bind`/`accept`/`recvmsg`) are unmediated (§3) — egress is governed, listening is not yet.
+- Non-network classes are unmediated: `execve`, `open`, `mmap`, `ptrace` are unmediated.
 - Tamperproofness against root/`CAP_BPF` is not claimed (§3).
 - Inheritance is a copy, not a narrowing delegation (§2.3); `DELEGATE` is not ported.
 - Enforcement is system-wide while attached; there is no cgroup/label scoping (§3).
@@ -172,7 +173,7 @@ Anderson's reference monitor requires three properties. We claim each only to th
 
 ## 7 Future Work
 
-- **Close the fd-passing bypass**: mediate `connect`/`bind`/`sendmsg` and/or fd receipt so a passed socket confers no rights.
+- **Receive-side coverage**: `bind`/`accept`/`recvmsg` if inbound mediation is wanted.
 - **Hook coverage**: `file_open` (READ/WRITE), `mmap` (ALLOC), `bprm_check` (EXEC), `ptrace`.
 - **Scoped enforcement**: bind the gate to a cgroup or label set rather than system-wide.
 - **Delegation narrowing on the LSM**: port the `DELEGATE` check and spawn-time mask attenuation.
