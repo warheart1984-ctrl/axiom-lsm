@@ -137,6 +137,16 @@ static int do_attach(const char *cgpath)
         fprintf(stderr, "warn: ptrace_traceme link pin failed\n");
     if (bpf_link__pin(skel->links.axiom_task_kill, PIN_DIR "/link-task_kill"))
         fprintf(stderr, "warn: task_kill link pin failed\n");
+    if (bpf_link__pin(skel->links.axiom_rename, PIN_DIR "/link-rename"))
+        fprintf(stderr, "warn: rename link pin failed\n");
+    if (bpf_link__pin(skel->links.axiom_link, PIN_DIR "/link-link"))
+        fprintf(stderr, "warn: link link pin failed\n");
+    if (bpf_link__pin(skel->links.axiom_setattr, PIN_DIR "/link-setattr"))
+        fprintf(stderr, "warn: setattr link pin failed\n");
+    if (bpf_link__pin(skel->links.axiom_truncate, PIN_DIR "/link-truncate"))
+        fprintf(stderr, "warn: truncate link pin failed\n");
+    if (bpf_link__pin(skel->links.axiom_mkdir, PIN_DIR "/link-mkdir"))
+        fprintf(stderr, "warn: mkdir link pin failed\n");
     fprintf(stderr, "[axiom-lsm] attached; pins in %s\n", PIN_DIR);
     lsm_bpf__destroy(skel); /* skeleton frees; pinned objs stay live */
     return 0;
@@ -159,6 +169,11 @@ static int do_detach(void)
     unlink(PIN_DIR "/link-ptrace_access");
     unlink(PIN_DIR "/link-ptrace_traceme");
     unlink(PIN_DIR "/link-task_kill");
+    unlink(PIN_DIR "/link-rename");
+    unlink(PIN_DIR "/link-link");
+    unlink(PIN_DIR "/link-setattr");
+    unlink(PIN_DIR "/link-truncate");
+    unlink(PIN_DIR "/link-mkdir");
     unlink(PIN_DIR "/task_rights");
     unlink(PIN_DIR "/events");
     unlink(PIN_DIR "/scope_cgroups");

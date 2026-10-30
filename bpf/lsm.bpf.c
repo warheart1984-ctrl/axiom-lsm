@@ -318,6 +318,43 @@ int BPF_PROG(axiom_inode_unlink, struct inode *dir, struct dentry *dentry)
     return governed_gate(12, RIGHTS_WRITE, 0);
 }
 
+// The rest of the mutation surface — rename carries both source and
+// destination dirs plus the overwrite-delete case in one call;
+// inode_setattr covers chmod/chown/utimes AND ftruncate on an already
+// open file (ia_valid records which attributes changed); path_truncate
+// is the path-based truncate(2); link and mkdir are namespace writes.
+SEC("lsm/inode_rename")
+int BPF_PROG(axiom_rename, struct inode *old_dir, struct dentry *old_dentry,
+             struct inode *new_dir, struct dentry *new_dentry, unsigned int flags)
+{
+    return governed_gate(16, RIGHTS_WRITE, flags);
+}
+
+SEC("lsm/inode_link")
+int BPF_PROG(axiom_link, struct dentry *old_dentry, struct inode *dir,
+             struct dentry *new_dentry)
+{
+    return governed_gate(17, RIGHTS_WRITE, 0);
+}
+
+SEC("lsm/inode_setattr")
+int BPF_PROG(axiom_setattr, struct dentry *dentry, struct iattr *attr)
+{
+    return governed_gate(18, RIGHTS_WRITE, attr ? attr->ia_valid : 0);
+}
+
+SEC("lsm/path_truncate")
+int BPF_PROG(axiom_truncate, struct path *path)
+{
+    return governed_gate(19, RIGHTS_WRITE, 0);
+}
+
+SEC("lsm/inode_mkdir")
+int BPF_PROG(axiom_mkdir, struct inode *dir, struct dentry *dentry, umode_t mask)
+{
+    return governed_gate(20, RIGHTS_WRITE, mask);
+}
+
 // ptrace(2): inspecting or steering another task is process-control
 // authority — and the natural way to hijack a *granted* task's rights.
 // Both directions gated: attaching (access_check) and volunteering to

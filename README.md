@@ -100,5 +100,7 @@ durable — a daemon killed mid-window loses its un-checkpointed tail.
 | Rights inheritance on fork (`lsm/task_alloc`) | `enforced` — INHERIT→ALLOW observed |
 | Daemon signing events into AX ledger records | `enforced` — `ledger-tool verify` PASS: 1498 records, 11 denies, 18 signed checkpoints |
 | Cgroup-scoped enforcement (`attach <cg>`) | `enforced` — in-cgroup `run 0x0` fully locked; outside unaffected |
-| Remaining surface | `recvmsg` (by design), rename/truncate/link/mkdir/chmod, `brk` (ALLOC is mmap-gated), `SPAWN` (defined, unused — fork ungated), ringbuf events droppable under flood |
+| `rename`/`link`/`setattr`/`truncate`/`mkdir` (WRITE, hooks 16–20) | `enforced` — all five DENY-evidenced |
+| Daemon signing events into AX ledger records | `enforced` — `ledger-tool verify` PASS: 3379 records, 16 denies, 21 signed checkpoints |
+| Remaining surface | `recvmsg` (by design), `path_symlink`/`rmdir`/`chown`/xattrs, `brk` (ALLOC is mmap-gated), `SPAWN` (defined, unused — fork ungated), ringbuf events droppable under flood |
 | Root/CAP_BPF detachment | trusted operator by design (see PAPER §3) |
