@@ -28,6 +28,10 @@ ungoverned tasks are not subjects of this monitor and pass free.
 sudo mount -t bpf bpf /sys/fs/bpf      # once per boot (check: mountpoint /sys/fs/bpf)
 make
 sudo ./axiom-lsm attach        # hook live, objects pinned to /sys/fs/bpf/axiom-lsm/
+# or: scoped mode — every hook applies only inside a cgroup subtree:
+sudo mkdir /sys/fs/cgroup/axgov
+sudo ./axiom-lsm attach /sys/fs/cgroup/axgov
+sudo AXIOM_CGROUP=/sys/fs/cgroup/axgov ./axiom-lsm run 0x1042E python3 agent.py
 sudo ./axiom-lsm audit &       # stream denials + grants
 python3 -c 'import socket; socket.socket()'   # PermissionError + DENY event
 sudo ./axiom-lsm grant <tgid> 0x10000         # grant Rights::NET to a task
@@ -77,8 +81,12 @@ durable — a daemon killed mid-window loses its un-checkpointed tail.
 - **The gate is INET-only by design**: gating `AF_NETLINK`/`AF_UNIX`
   breaks `sudo` (PAM audit) and local IPC — a reference monitor that
   mediates too much locks out its operators.
-- `attach` is **system-wide** default-deny for INET sockets while
-  attached; cgroup scoping is roadmap.
+- `attach` with no cgroup is **system-wide** default-deny for INET
+  sockets; `attach <cgroup>` scopes EVERY hook to that subtree —
+  inside, all 14 classes deny at rights=0 unless granted (`run` +
+  `AXIOM_CGROUP` joins pre-exec); outside, untouched. Don't write your
+  own shell's pid into `cgroup.procs` — a governed shell can't even
+  write the file that governs it (learned the hard way).
 
 ## Status
 
@@ -90,6 +98,7 @@ durable — a daemon killed mid-window loses its un-checkpointed tail.
 | `file_open` (READ/WRITE), `mmap` (ALLOC), `bprm_check` (EXECUTE) | `enforced` — governed-scoped; DENY evidenced per class |
 | `bind`/`listen`/`accept` (RECV), `inode_create`+`unlink` (WRITE), `ptrace` both directions (KILL) | `enforced` — DENY evidenced per class |
 | Rights inheritance on fork (`lsm/task_alloc`) | `enforced` — INHERIT→ALLOW observed |
-| Daemon signing events into AX ledger records | `enforced` — `ledger-tool verify` PASS: 1415 records, 10 denies, 15 signed checkpoints |
-| Remaining surface | cgroup scoping, `recvmsg` (ungated by design — replies confer no new authority), rename/mkdir, DELEGATE narrowing |
+| Daemon signing events into AX ledger records | `enforced` — `ledger-tool verify` PASS: 1498 records, 11 denies, 18 signed checkpoints |
+| Cgroup-scoped enforcement (`attach <cg>`) | `enforced` — in-cgroup `run 0x0` fully locked; outside unaffected |
+| Remaining surface | `recvmsg` (ungated by design), rename/mkdir/rmdir, `DELEGATE` narrowing, pin/persist across reboots |
 | Root/CAP_BPF detachment | trusted operator by design (see PAPER §3) |

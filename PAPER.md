@@ -4,7 +4,7 @@ Jon Halstead
 Independent — Boyne Falls, Michigan
 warheart1984-ctrl
 
-*v0.7 — v0.2 threat model; v0.4 signed-evidence daemon; v0.5 SCM_RIGHTS closed; v0.6 governed file/mmap/exec; v0.7 RECV/ptrace/inode gates complete the listed bypass surface*
+*v0.8 — v0.7 completed the bypass surface (RECV/ptrace/inode); v0.8 adds cgroup-scoped enforcement as the deployment shape*
 
 ## Abstract
 
@@ -100,7 +100,7 @@ Anderson's reference monitor requires three properties. We claim each only to th
 | Tamperproof | **Partial** | Holds vs the governed unprivileged task (it cannot detach, unpin, or edit task storage — it lacks `CAP_BPF`). Does **not** hold vs root/`CAP_BPF` |
 | Small enough to verify | Argued, bounded | Gate + loader = **295 lines** (111 BPF, 184 loader). The honest caveat: the real TCB includes the kernel's BPF verifier and LSM framework — our addition is small; the base it rides on is not |
 
-**Scope.** `attach` is **system-wide, not scoped to a governed set**: while attached, *every* task on the host that lacks a `task_rights` entry is denied `AF_INET`/`AF_INET6` socket creation. That is the intended default-deny posture — but it means attachment is itself a privileged policy act, and a production deployment would scope enforcement to a cgroup or labeled set rather than the whole system.
+**Scope.** Two modes. `attach` without a cgroup is **system-wide** default-deny for INET sockets, with other classes governed-scoped. `attach <cgroup>` scopes *every* hook to that cgroup subtree via `bpf_current_task_under_cgroup`: inside, all 14 classes deny at rights=0 unless granted (a `run 0x0` task can't even `execve`); outside, tasks are untouched. The scoped form is the deployment shape — drop the agent's process tree into the cgroup and the whole subtree is governed. One subtlety worth recording: the scoped agent must be added *before* grant, and the grant itself must come from an ungoverned parent — a child that joins first finds its own `pidfd_open` denied at rights=0 (self-gating, now avoided by a parent-side grant+join handshake in `run`).
 
 **Bypasses — closed and open:**
 

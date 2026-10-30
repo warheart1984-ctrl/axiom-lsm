@@ -73,7 +73,7 @@ static int pinned_map_fd(const char *name)
 
 // BPF hooks see host-kernel tgids; inside a pid namespace (WSL, containers)
 
-static int do_attach(void)
+static int do_attach(const char *cgpath)
 {
     if (mkdir(PIN_DIR, 0755) && errno != EEXIST) {
         fprintf(stderr, "mkdir %s: %s — is bpffs mounted? (`mount -t bpf bpf /sys/fs/bpf`)\n",
@@ -85,8 +85,27 @@ static int do_attach(void)
     int err = lsm_bpf__attach(skel);
     if (err) { fprintf(stderr, "attach: %s\n", strerror(-err)); lsm_bpf__destroy(skel); return 1; }
     if (pin_map(skel->maps.task_rights, "task_rights") ||
-        pin_map(skel->maps.events, "events")) {
+        pin_map(skel->maps.events, "events") ||
+        pin_map(skel->maps.scope_cgroups, "scope_cgroups") ||
+        pin_map(skel->maps.scope_cfg, "scope_cfg")) {
         lsm_bpf__detach(skel); lsm_bpf__destroy(skel); return 1;
+    }
+    if (cgpath) {
+        int cgfd = open(cgpath, O_RDONLY | O_DIRECTORY);
+        if (cgfd < 0) {
+            fprintf(stderr, "%s: %s\n", cgpath, strerror(errno));
+            lsm_bpf__detach(skel); lsm_bpf__destroy(skel); return 1;
+        }
+        __u32 k = 0;
+        __u64 one = 1;
+        if (bpf_map_update_elem(bpf_map__fd(skel->maps.scope_cgroups), &k, &cgfd, BPF_ANY) ||
+            bpf_map_update_elem(bpf_map__fd(skel->maps.scope_cfg), &k, &one, BPF_ANY)) {
+            fprintf(stderr, "cgroup scope: %s\n", strerror(errno));
+            close(cgfd);
+            lsm_bpf__detach(skel); lsm_bpf__destroy(skel); return 1;
+        }
+        close(cgfd);
+        fprintf(stderr, "[axiom-lsm] scoped to cgroup %s\n", cgpath);
     }
     if (bpf_link__pin(skel->links.axiom_socket_create, PIN_DIR "/link-socket_create"))
         fprintf(stderr, "warn: link pin failed — detach won't find it\n");
@@ -139,6 +158,8 @@ static int do_detach(void)
     unlink(PIN_DIR "/link-ptrace_traceme");
     unlink(PIN_DIR "/task_rights");
     unlink(PIN_DIR "/events");
+    unlink(PIN_DIR "/scope_cgroups");
+    unlink(PIN_DIR "/scope_cfg");
     rmdir(PIN_DIR);
     fprintf(stderr, "[axiom-lsm] detached\n");
     return 0;
@@ -191,16 +212,33 @@ static int do_run(const char *hex_s, char **cmd)
     __u64 rights = strtoull(hex_s, NULL, 16);
     int fd = pinned_map_fd("task_rights");
     if (fd < 0) return 1;
+    const char *cg = getenv("AXIOM_CGROUP");
+    int syncp[2] = {-1, -1};
+    if (cg && pipe(syncp)) { perror("pipe"); return 1; }
     pid_t p = fork();
     if (p == 0) {
-        /* task storage survives exec: the grant rides the same task_struct */
-        if (grant_task(fd, getpid(), rights)) {
+        if (cg) {
+            /* scoped mode: the (ungoverned) parent grants us + adds us to
+             * the cgroup, then releases us — otherwise our own pidfd_open
+             * and the cgroup.procs write would be gated as ungranted */
+            if (syncp[0] >= 0) { char b; close(syncp[1]); (void)!read(syncp[0], &b, 1); close(syncp[0]); }
+        } else if (grant_task(fd, getpid(), rights)) {
             dprintf(2, "[axiom-lsm] rights grant failed\n");
             _exit(126);
         }
         dprintf(2, "[axiom-lsm] task granted 0x%llx\n", (unsigned long long)rights);
         execvp(cmd[0], cmd);
         _exit(127);
+    }
+    if (cg) {
+        if (grant_task(fd, p, rights))
+            fprintf(stderr, "[axiom-lsm] rights grant failed\n");
+        char pth[512];
+        snprintf(pth, sizeof pth, "%s/cgroup.procs", cg);
+        int cfd = open(pth, O_WRONLY);
+        if (cfd >= 0) { dprintf(cfd, "%d", p); close(cfd); }
+        else fprintf(stderr, "[axiom-lsm] %s: %s\n", pth, strerror(errno));
+        if (syncp[1] >= 0) { close(syncp[0]); (void)!write(syncp[1], "g", 1); close(syncp[1]); }
     }
     int st;
     waitpid(p, &st, 0);
@@ -502,10 +540,10 @@ int main(int argc, char **argv)
 {
     if (argc < 2) {
         fprintf(stderr,
-            "usage: axiom-lsm attach|detach|grant <tgid> <hex>|run <hex> <cmd...>|audit|record <img> [every]\n");
+            "usage: axiom-lsm attach [cgroup]|detach|grant <tgid> <hex>|run <hex> <cmd...>|audit|record <img> [every]\n");
         return 2;
     }
-    if (!strcmp(argv[1], "attach")) return do_attach();
+    if (!strcmp(argv[1], "attach")) return do_attach(argc > 2 ? argv[2] : NULL);
     if (!strcmp(argv[1], "detach")) return do_detach();
     if (!strcmp(argv[1], "grant") && argc == 4) return do_grant(argv[2], argv[3]);
     if (!strcmp(argv[1], "audit")) return do_audit();

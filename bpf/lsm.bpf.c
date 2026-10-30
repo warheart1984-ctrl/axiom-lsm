@@ -58,6 +58,34 @@ struct {
     __uint(max_entries, 1 << 20);
 } events SEC(".maps");
 
+// Scoped mode: when the operator pins a cgroup into scope_cgroups and
+// sets scope_cfg[0]=1, every hook applies only to tasks inside that
+// cgroup subtree — the deployment shape. Unconfigured = legacy mode
+// (egress host-wide; other classes governed-entry-only).
+struct {
+    __uint(type, BPF_MAP_TYPE_CGROUP_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u32);
+} scope_cgroups SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} scope_cfg SEC(".maps");
+
+// 0 = unconfigured (legacy), 1 = in scope, -1 = out of scope.
+static __always_inline int scope_check(void)
+{
+    __u32 k = 0;
+    __u64 *on = bpf_map_lookup_elem(&scope_cfg, &k);
+    if (!on || !*on)
+        return 0;
+    return bpf_current_task_under_cgroup(&scope_cgroups, 0) ? 1 : -1;
+}
+
 static __always_inline int gate(__u32 hook, __u64 need, __u64 arg)
 {
     __u64 pidtgid = bpf_get_current_pid_tgid();
@@ -113,6 +141,8 @@ int BPF_PROG(axiom_task_alloc, struct task_struct *task,
 SEC("lsm/socket_create")
 int BPF_PROG(axiom_socket_create, int family, int type, int protocol, int kern)
 {
+    if (scope_check() < 0)
+        return 0;
     if (family != AF_INET && family != AF_INET6)
         return 0;
     return gate(1, RIGHTS_NET, family);
@@ -135,6 +165,8 @@ SEC("lsm/socket_connect")
 int BPF_PROG(axiom_socket_connect, struct socket *sock,
              struct sockaddr *address, int addrlen)
 {
+    if (scope_check() < 0)
+        return 0;
     int fam = inet_family_of(sock);
     if (fam != AF_INET && fam != AF_INET6)
         return 0;
@@ -155,6 +187,8 @@ SEC("lsm/socket_sendmsg")
 int BPF_PROG(axiom_socket_sendmsg, struct socket *sock,
              struct msghdr *msg, int size)
 {
+    if (scope_check() < 0)
+        return 0;
     int fam = inet_family_of(sock);
     if (fam != AF_INET && fam != AF_INET6)
         return 0;
@@ -168,9 +202,15 @@ int BPF_PROG(axiom_socket_sendmsg, struct socket *sock,
 // policy, but file/exec gates are per-subject, like the kernel's model.
 static __always_inline int governed_gate(__u32 hook, __u64 need, __u64 arg)
 {
-    __u64 *r = bpf_task_storage_get(&task_rights, bpf_get_current_task_btf(), 0, 0);
-    if (!r)
-        return 0;
+    int sc = scope_check();
+    if (sc < 0)
+        return 0;                    /* outside the governed cgroup — not a subject */
+    if (sc == 0) {
+        /* legacy: only tasks holding a rights entry are subjects */
+        __u64 *r = bpf_task_storage_get(&task_rights, bpf_get_current_task_btf(), 0, 0);
+        if (!r)
+            return 0;
+    }
     return gate(hook, need, arg);
 }
 
