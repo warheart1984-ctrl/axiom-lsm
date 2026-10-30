@@ -19,6 +19,9 @@
 #ifndef AF_INET6
 #define AF_INET6 10
 #endif
+#ifndef AF_VSOCK
+#define AF_VSOCK 40
+#endif
 
 // axiom-x-capability bit values (keep in sync with the prototype).
 #define RIGHTS_NET (1ULL << 16)
@@ -135,6 +138,8 @@ int BPF_PROG(axiom_task_alloc, struct task_struct *task,
     return 0;
 }
 
+static __always_inline int governed_gate(__u32 hook, __u64 need, __u64 arg);
+
 // socket(2) is the governed egress channel: Rights::NET or nothing.
 // Only INET families are egress — AF_UNIX/AF_NETLINK local IPC is not,
 // and gating it breaks the tools needed to govern (sudo's audit socket).
@@ -143,8 +148,13 @@ int BPF_PROG(axiom_socket_create, int family, int type, int protocol, int kern)
 {
     if (scope_check() < 0)
         return 0;
-    if (family != AF_INET && family != AF_INET6)
+    if (family != AF_INET && family != AF_INET6) {
+        /* AF_VSOCK is egress to the hypervisor/host — a boundary, not
+         * local IPC; governed-scoped so host services keep working */
+        if (family == AF_VSOCK)
+            return governed_gate(1, RIGHTS_NET, family);
         return 0;
+    }
     return gate(1, RIGHTS_NET, family);
 }
 
@@ -168,8 +178,11 @@ int BPF_PROG(axiom_socket_connect, struct socket *sock,
     if (scope_check() < 0)
         return 0;
     int fam = inet_family_of(sock);
-    if (fam != AF_INET && fam != AF_INET6)
+    if (fam != AF_INET && fam != AF_INET6) {
+        if (fam == AF_VSOCK)
+            return governed_gate(3, RIGHTS_NET, fam);
         return 0;
+    }
     __u64 a = fam;
     if (address) {
         if (fam == AF_INET)
@@ -190,8 +203,11 @@ int BPF_PROG(axiom_socket_sendmsg, struct socket *sock,
     if (scope_check() < 0)
         return 0;
     int fam = inet_family_of(sock);
-    if (fam != AF_INET && fam != AF_INET6)
+    if (fam != AF_INET && fam != AF_INET6) {
+        if (fam == AF_VSOCK)
+            return governed_gate(4, RIGHTS_NET, fam);
         return 0;
+    }
     return gate(4, RIGHTS_NET, fam);
 }
 
@@ -330,7 +346,9 @@ int BPF_PROG(axiom_task_kill, struct task_struct *p,
 {
     if (p == bpf_get_current_task_btf())
         return 0;
-    if (info && info->si_code > 0)
+    /* kernel-origin signals pass: NULL info, SEND_SIG_PRIV (== 1), or a
+     * userspace-directed si_code — kernel sends carry si_code > 0 */
+    if ((unsigned long)info <= 1 || info->si_code > 0)
         return 0;
     return governed_gate(15, RIGHTS_KILL, sig);
 }

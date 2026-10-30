@@ -1,7 +1,7 @@
 # A Constitutional Reference Monitor for AI Agency: Kernel-Mediated Governance for Autonomous Systems
 
 Jon Halstead
-Independent — Boyne Falls, Michigan
+Independent
 warheart1984-ctrl
 
 *v0.9 — v0.8 cgroup-scoped enforcement; v0.9 answers a code-level review: signals gated under KILL (15 hooks), ringbuf-loss caveat restored, size/scope claims corrected, remaining mutation surface listed*
@@ -10,7 +10,7 @@ warheart1984-ctrl
 
 Current AI governance models treat safety as a userspace convention: middleware filters, prompt guards, and policy wrappers that sit around autonomous agents. These layers are bypassable. An agent that can write code, delete data, or open network connections can often find the path around a userspace check.
 
-We present two artifacts implementing the same constitutional model. **Axiom-X** is a Rust x86_64 research kernel — the reference implementation — in which user processes run in ring 3 under per-process page tables and every governed syscall passes a rights check before execution, with decisions recorded to a SHA-256 hash-chained evidence ledger carrying Ed25519-signed checkpoints. **axiom-lsm** is a BPF-LSM module that enforces the same rights model inside a stock Linux kernel: `socket()` returns `-EPERM` for tasks without `Rights::NET`, grants are keyed by task struct (immune to PID namespaces), and every decision is streamed to a ring-buffer audit channel that a daemon signs into the kernel's own ledger format — verified offline by the same `ledger-tool`.
+We present two artifacts implementing the same constitutional model. **Axiom-X** is a Rust x86_64 research kernel — the reference implementation — in which user processes run in ring 3 under per-process page tables and every governed syscall passes a rights check before execution, with decisions recorded to a SHA-256 hash-chained evidence ledger carrying Ed25519-signed checkpoints. **axiom-lsm** is a BPF-LSM module that enforces the same rights model inside a Linux kernel with BPF LSM enabled: `socket()` returns `-EPERM` for tasks without `Rights::NET`, grants are keyed by task struct (immune to PID namespaces), and every decision is streamed to a ring-buffer audit channel that a daemon signs into the kernel's own ledger format — verified offline by the same `ledger-tool`.
 
 Measured results include: a self-authored compromised-agent workload refused on all three attempted escape paths (`ax_egress`, escalated spawn, `ax_mmap` → `-EPERM`); 88 of 88 proxy signatures over request‖response digests verified offline — which binds the response bytes to the proxy's key, and asserts nothing about upstream provenance; a disk-carried signing identity surviving verification; an external rollback anchor detecting a full-disk image swap; and on Linux, `PermissionError` for ungranted tasks versus `socket ok` under a granted rights mask.
 
@@ -48,7 +48,7 @@ Two security properties follow:
 | | Axiom-X (prototype) | axiom-lsm (application) |
 |---|---|---|
 | Form | Rust x86_64 kernel | BPF LSM programs + userspace loader |
-| Environment | QEMU guest | Stock Linux kernel (BPF LSM) |
+| Environment | QEMU guest | Linux kernel with `CONFIG_BPF_LSM` (validated on WSL2's Microsoft kernel, 6.8.0-147) |
 | Enforcement | Syscall dispatch: `required_right(nr)` | `lsm/socket_create` + `connect` + `sendmsg` hooks |
 | Rights | Kernel-owned per-process bitmask | `BPF_MAP_TYPE_TASK_STORAGE` per task struct |
 | Evidence | On-disk hash-chained ledger, signed checkpoints | Ring-buffer event stream (ledgered by a daemon — roadmap) |
@@ -100,12 +100,14 @@ Anderson's reference monitor requires three properties. We claim each only to th
 | Tamperproof | **Partial** | Holds vs the governed unprivileged task (it cannot detach, unpin, or edit task storage — it lacks `CAP_BPF`). Does **not** hold vs root/`CAP_BPF` |
 | Small enough to verify | Argued, bounded | Gate + loader = **895 lines** (338 BPF, 557 loader) as of v0.9 — grown with hook coverage; still auditable in one sitting. The honest caveat: the real TCB includes the kernel's BPF verifier and LSM framework — our addition is small; the base it rides on is not |
 
-**Scope.** Two modes. `attach` without a cgroup is **system-wide** default-deny for INET sockets, with other classes governed-scoped. `attach <cgroup>` scopes *every* hook to that cgroup subtree via `bpf_current_task_under_cgroup`: inside, all 14 classes deny at rights=0 unless granted (a `run 0x0` task can't even `execve`); outside, tasks are untouched. The scoped form is the deployment shape — drop the agent's process tree into the cgroup and the whole subtree is governed. One subtlety worth recording: the scoped agent must be added *before* grant, and the grant itself must come from an ungoverned parent — a child that joins first finds its own `pidfd_open` denied at rights=0 (self-gating, now avoided by a parent-side grant+join handshake in `run`).
+**Scope.** Two modes. `attach` without a cgroup is **system-wide** default-deny for INET sockets, with other classes governed-scoped. `attach <cgroup>` scopes *every* hook to that cgroup subtree via `bpf_current_task_under_cgroup`: inside, all 15 classes deny at rights=0 unless granted (a `run 0x0` task can't even `execve`); outside, tasks are untouched. The scoped form is the deployment shape — drop the agent's process tree into the cgroup and the whole subtree is governed. One subtlety worth recording: the scoped agent must be added *before* grant, and the grant itself must come from an ungoverned parent — a child that joins first finds its own `pidfd_open` denied at rights=0 (self-gating, now avoided by a parent-side grant+join handshake in `run`).
 
 **Bypasses — closed and open:**
 
 - **`SCM_RIGHTS` fd-passing — CLOSED (v0.5).** `socket_create` alone mediated *creation*, not receipt: a permitted task could pass an INET fd to a denied task over `AF_UNIX`, and the denied task could `connect`/`send` on it. The gate now also mediates `socket_connect` (hook 3, destination port audited) and `socket_sendmsg` (hook 4 — required because UDP reaches arbitrary destinations without `connect`). Demonstrated: granted task passes a live socket to an ungranted task; the ungranted task's `connect` on the passed fd returns `-EPERM` and lands a signed DENY record (`tgid 6324 rights 0x0 hook 3 arg 2304 -> DENY`, port 9 network-order). The mediation boundary moved from *object creation* to *network action*.
-- **Inbound paths are unmediated**: `bind`/`listen`/`accept`/`recvmsg` are not gated — the model governs *egress*, not listening. A denied task can still hold a bound INET socket via a passed fd; incoming connections on it are not currently denied (the send path is, so no data leaves — but `sendmsg` on a *connected-but-passed* socket is now denied too, so the residual is receive-only).
+- **Inbound is now mediated for governed tasks**: `bind`/`listen`/`accept` require `RECV` (§2.3); `recvmsg` stays ungated by design. A passed fd confers no inbound authority either — the `accept` on it needs `RECV`.
+- **`AF_VSOCK`**: Hyper-V/VM sockets are egress to the host/hypervisor — gated under `NET` for governed tasks on all three egress hooks (ungoverned host services unaffected). Other non-INET families (`AF_BLUETOOTH`, `AF_CAN`, `AF_PACKET`, …) remain ungated — a raw-packet or bluetooth egress channel is a stated gap, not an oversight.
+- **`AF_UNIX` local IPC** is unmediated by design (the operator escape hatch — and the channel that makes SCM_RIGHTS attacks possible, hence the connect/sendmsg gates).
 - **`AF_UNIX` sockets are unmediated by design** (operator escape hatch).
 
 ## 4 Evaluation
@@ -161,11 +163,11 @@ Anderson's reference monitor requires three properties. We claim each only to th
 - **Namespace mutations beyond create/unlink are unmediated**: `rename` over an existing file deletes it *without* passing through `inode_unlink`; `truncate(2)`, `link`, `mkdir`, `chmod` change file state without opening it and never reach `file_open`. The WRITE gate currently covers open-for-write, create, and unlink — not the rest of the mutation surface.
 - `ALLOC` is **mmap-gated, not memory authority**: `brk`/`sbrk` heap growth is not covered.
 - `SPAWN` is defined but **not enforced**: fork is ungated by design (a forked child *is* the parent — `task_alloc` already bounds it to the parent's mask). `SPAWN` is reserved for a spawn-with-narrowing delegation API.
-- "System-wide" applies to exactly three hooks — `socket_create`/`connect`/`sendmsg`. Every other class is governed-scoped: tasks without a `task_rights` entry are not subjects.
+- "System-wide" applies to exactly three hooks — `socket_create`/`connect`/`sendmsg` — and only in unscoped mode; under `attach <cgroup>` nothing outside the cgroup is gated at all. Every other class is governed-scoped: tasks without a `task_rights` entry are not subjects.
 - Non-network classes apply only to governed tasks — an unlisted task is not a subject of this monitor (by scoping design, §2.3/§3).
 - Tamperproofness against root/`CAP_BPF` is not claimed (§3).
 - Inheritance is a copy, not a narrowing delegation (§2.3); `DELEGATE` is not ported.
-- Enforcement is system-wide while attached; there is no cgroup/label scoping (§3).
+- Enforcement requires `CAP_SYS_ADMIN`/`CAP_BPF` to load and is tamperproof only against the governed task (§3).
 
 ## 5 Related Work
 
@@ -190,7 +192,7 @@ Anderson's reference monitor requires three properties. We claim each only to th
 
 - **Namespace coverage**: `rename`/`mkdir`/`rmdir`/`mknod` and friends — create/unlink are mediated, the rest of the mutation surface is not yet.
 - **`recvmsg`** if a deployment wants inbound-bytes policy (currently ungated by design).
-- **Scoped enforcement**: bind the gate to a cgroup or label set rather than system-wide.
+- **Non-INET egress families**: `AF_PACKET`/`AF_BLUETOOTH`/`AF_CAN` and friends — `AF_VSOCK` is gated; the rest of the family space is not yet.
 - **Delegation narrowing on the LSM**: port the `DELEGATE` check and spawn-time mask attenuation.
 - **Remote anchoring**: move `ledger-anchor` to storage the disk-writer cannot reach.
 - **Jailbreak suite on Linux**: the kernel's compromised-agent workload ported to the LSM, plus attempts against the stated bypasses.
@@ -198,12 +200,12 @@ Anderson's reference monitor requires three properties. We claim each only to th
 
 ## 8 Conclusion
 
-Governance for agents cannot be a convention layered over action; it must be the point every action traverses. The kernel prototype exercised the model under QEMU — rights gated, denials ledgered, signatures verifiable. The LSM enforced the same constitution on a stock kernel the same day: an ungranted task got `-EPERM`; a granted task got a socket; a forked child inherited bounded rights; every decision was recorded.
+Governance for agents cannot be a convention layered over action; it must be the point every action traverses. The kernel prototype exercised the model under QEMU — rights gated, denials ledgered, signatures verifiable. The LSM enforced the same constitution on a real kernel (WSL2, `CONFIG_BPF_LSM`) the same day: an ungranted task got `-EPERM`; a granted task got a socket; a forked child inherited bounded rights; decisions were recorded (best-effort under ringbuf saturation — §3).
 
 We claim a reference monitor for the gated surface against the governed task — and we say plainly where that claim stops: the operator, the unmediated syscalls, the passed file descriptor. The escape paths are listed, not hidden. That is what makes the rest of it worth reading.
 
 Linux is trusted with machinery. Governance is trusted with agency. They are not the same thing — and now they are different layers.
 
-**Availability:** Axiom-X at github.com/warheart1984-ctrl/Axiom-X; axiom-lsm at github.com/warheart1984-ctrl/axiom-lsm.
+**Availability:** Axiom-X at https://github.com/warheart1984-ctrl/Axiom-X; axiom-lsm at https://github.com/warheart1984-ctrl/axiom-lsm.
 
 **Keywords:** AI governance, reference monitor, complete mediation, Linux Security Module, BPF LSM, constitutional compute, evidence engineering, agentic systems.
