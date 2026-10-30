@@ -96,9 +96,9 @@ durable — a daemon killed mid-window loses its un-checkpointed tail.
 | `socket_connect` + `socket_sendmsg` gates | `enforced` — passed-fd `connect` DENIED (hook 3, port audited) |
 | SCM_RIGHTS bypass | **closed** — mediation moved from creation to network action |
 | `file_open` (READ/WRITE), `mmap` (ALLOC), `bprm_check` (EXECUTE) | `enforced` — governed-scoped; DENY evidenced per class |
-| `bind`/`listen`/`accept` (RECV), `inode_create`+`unlink` (WRITE), `ptrace` both directions (KILL) | `enforced` — DENY evidenced per class |
+| `bind`/`listen`/`accept` (RECV), `inode_create`+`unlink` (WRITE), `ptrace` both directions + `task_kill` signals (KILL) | `enforced` — DENY evidenced per class |
 | Rights inheritance on fork (`lsm/task_alloc`) | `enforced` — INHERIT→ALLOW observed |
 | Daemon signing events into AX ledger records | `enforced` — `ledger-tool verify` PASS: 1498 records, 11 denies, 18 signed checkpoints |
 | Cgroup-scoped enforcement (`attach <cg>`) | `enforced` — in-cgroup `run 0x0` fully locked; outside unaffected |
-| Remaining surface | `recvmsg` (ungated by design), rename/mkdir/rmdir, `DELEGATE` narrowing, pin/persist across reboots |
+| Remaining surface | `recvmsg` (by design), rename/truncate/link/mkdir/chmod, `brk` (ALLOC is mmap-gated), `SPAWN` (defined, unused — fork ungated), ringbuf events droppable under flood |
 | Root/CAP_BPF detachment | trusted operator by design (see PAPER §3) |

@@ -319,4 +319,20 @@ int BPF_PROG(axiom_ptrace_traceme, struct task_struct *parent)
     return governed_gate(14, RIGHTS_KILL, 0);
 }
 
+// Signal delivery is process-control authority crossing a task boundary:
+// without this gate a governed task could SIGKILL/SIGSTOP a *granted*
+// task or the monitor itself. Self-signals (raise/abort) pass — a task
+// degrading itself is not an authority crossing — and kernel-origin
+// signals (si_code > 0, e.g. SIGCHLD to a parent) must stay free.
+SEC("lsm/task_kill")
+int BPF_PROG(axiom_task_kill, struct task_struct *p,
+             struct kernel_siginfo *info, int sig, const struct cred *cred)
+{
+    if (p == bpf_get_current_task_btf())
+        return 0;
+    if (info && info->si_code > 0)
+        return 0;
+    return governed_gate(15, RIGHTS_KILL, sig);
+}
+
 char LICENSE[] SEC("license") = "GPL";

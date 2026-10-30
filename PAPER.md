@@ -4,7 +4,7 @@ Jon Halstead
 Independent — Boyne Falls, Michigan
 warheart1984-ctrl
 
-*v0.8 — v0.7 completed the bypass surface (RECV/ptrace/inode); v0.8 adds cgroup-scoped enforcement as the deployment shape*
+*v0.9 — v0.8 cgroup-scoped enforcement; v0.9 answers a code-level review: signals gated under KILL (15 hooks), ringbuf-loss caveat restored, size/scope claims corrected, remaining mutation surface listed*
 
 ## Abstract
 
@@ -73,7 +73,7 @@ The kernel exercised the model — which invariants hold, which mechanisms leak 
 - `lsm/file_open` (hook 5): `READ`/`WRITE` rights by `f_mode`. `lsm/mmap_file` (hook 6): `ALLOC`. `lsm/bprm_check_security` (hook 7): `EXECUTE`. These are **governed-scoped**: they apply only to tasks holding a `task_rights` entry (any entry, even `0x0` — i.e., spawned under `run`/`grant` and their descendants). Denying file opens or exec for every unlisted task would brick the host — the egress gate is host policy; file/exec gates are per-subject, matching the kernel's model.
 - Inbound authority, `RECV` (`0x100`): `socket_bind`/`socket_listen`/`socket_accept` (hooks 8–10) — becoming *reachable* is new authority. `recvmsg` is intentionally ungated: a reply to a petition you were allowed to send confers no new authority, and gating it would break every client.
 - Namespace mutation, `WRITE`: `inode_create` (hook 11) and `inode_unlink` (hook 12) — creating or deleting a name is write authority on the filesystem, and `inode_create` firing before `file_open` closes the gap where a denied `O_CREAT` left an empty file behind.
-- Process control, `KILL` (`0x800`): `ptrace_access_check` and `ptrace_traceme` (hooks 13–14) — both directions gated; a governed task could otherwise ptrace a *granted* task and hijack its rights, or volunteer to an ungoverned accomplice.
+- Process control, `KILL` (`0x800`): `ptrace_access_check`/`ptrace_traceme` (hooks 13–14) *and* `task_kill` (hook 15) — signal delivery to *other* tasks is process-control authority crossing a boundary; self-signals (raise/abort) and kernel-origin signals (`si_code > 0`, e.g. SIGCHLD) pass free.
 - `task_rights` is `BPF_MAP_TYPE_TASK_STORAGE`: per-task-struct storage updated from userspace via `pidfd`. Chosen after PID namespaces made tgid-keyed maps unreliable (§4.3).
 - `lsm/task_alloc` hook: copies the parent's rights to the child's task storage at fork. This is a **plain copy bounded above by the parent** — a child can never hold rights the parent lacked, so no amplification is possible. It is *not* yet the kernel's stronger model: Axiom-X requires `DELEGATE` to grant a nonempty mask and supports narrowing at spawn; the LSM's inheritance neither narrows nor checks `DELEGATE`. The weaker form is intentional for v0 (it matches POSIX fork semantics — a forked child *is* the parent); attenuation-by-narrowing belongs to the spawn/delegation API in future work.
 - Ring-buffer audit stream: every decision emits `{tgid, rights, arg, hook, kind}` where kind ∈ {ALLOW, DENY, INHERIT}.
@@ -96,9 +96,9 @@ Anderson's reference monitor requires three properties. We claim each only to th
 
 | Anderson property | Status | Evidence |
 |---|---|---|
-| Always invoked | Satisfied for the gated surface | Every `AF_INET`/`AF_INET6` `socket()` traverses `lsm/socket_create`; DENY/ALLOW events captured for every observed call |
+| Always invoked | Satisfied for the gated surface, with a caveat | Every listed hook traverses the gate — but the *record* is not guaranteed: `bpf_ringbuf_reserve` can fail under a full buffer, and a deny then happens with no event (the `record` daemon mitigates by draining continuously; a flood can still outpace it). "Every decision produces a record" is therefore best-effort under saturation — stated plainly because the alternative is a claim we can't keep |
 | Tamperproof | **Partial** | Holds vs the governed unprivileged task (it cannot detach, unpin, or edit task storage — it lacks `CAP_BPF`). Does **not** hold vs root/`CAP_BPF` |
-| Small enough to verify | Argued, bounded | Gate + loader = **295 lines** (111 BPF, 184 loader). The honest caveat: the real TCB includes the kernel's BPF verifier and LSM framework — our addition is small; the base it rides on is not |
+| Small enough to verify | Argued, bounded | Gate + loader = **895 lines** (338 BPF, 557 loader) as of v0.9 — grown with hook coverage; still auditable in one sitting. The honest caveat: the real TCB includes the kernel's BPF verifier and LSM framework — our addition is small; the base it rides on is not |
 
 **Scope.** Two modes. `attach` without a cgroup is **system-wide** default-deny for INET sockets, with other classes governed-scoped. `attach <cgroup>` scopes *every* hook to that cgroup subtree via `bpf_current_task_under_cgroup`: inside, all 14 classes deny at rights=0 unless granted (a `run 0x0` task can't even `execve`); outside, tasks are untouched. The scoped form is the deployment shape — drop the agent's process tree into the cgroup and the whole subtree is governed. One subtlety worth recording: the scoped agent must be added *before* grant, and the grant itself must come from an ungoverned parent — a child that joins first finds its own `pidfd_open` denied at rights=0 (self-gating, now avoided by a parent-side grant+join handshake in `run`).
 
@@ -157,7 +157,11 @@ Anderson's reference monitor requires three properties. We claim each only to th
 ### 4.4 What is *not* yet proven
 
 - Records are durable only after a checkpoint: a daemon killed mid-window loses its un-checkpointed tail (provisional records are dropped on resume — by design, matching the kernel's signed-prefix semantics).
-- `recvmsg` is ungated by design (§2.3): replies to permitted egress confer no new authority. `rename`/`mkdir`/`rmdir` and other namespace mutations beyond create/unlink are unmediated.
+- `recvmsg` is ungated by design (§2.3): replies to permitted egress confer no new authority.
+- **Namespace mutations beyond create/unlink are unmediated**: `rename` over an existing file deletes it *without* passing through `inode_unlink`; `truncate(2)`, `link`, `mkdir`, `chmod` change file state without opening it and never reach `file_open`. The WRITE gate currently covers open-for-write, create, and unlink — not the rest of the mutation surface.
+- `ALLOC` is **mmap-gated, not memory authority**: `brk`/`sbrk` heap growth is not covered.
+- `SPAWN` is defined but **not enforced**: fork is ungated by design (a forked child *is* the parent — `task_alloc` already bounds it to the parent's mask). `SPAWN` is reserved for a spawn-with-narrowing delegation API.
+- "System-wide" applies to exactly three hooks — `socket_create`/`connect`/`sendmsg`. Every other class is governed-scoped: tasks without a `task_rights` entry are not subjects.
 - Non-network classes apply only to governed tasks — an unlisted task is not a subject of this monitor (by scoping design, §2.3/§3).
 - Tamperproofness against root/`CAP_BPF` is not claimed (§3).
 - Inheritance is a copy, not a narrowing delegation (§2.3); `DELEGATE` is not ported.
