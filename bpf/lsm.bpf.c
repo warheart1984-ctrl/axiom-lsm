@@ -23,6 +23,14 @@
 // axiom-x-capability bit values (keep in sync with the prototype).
 #define RIGHTS_NET (1ULL << 16)
 #define RIGHTS_ALLOC (1ULL << 5)
+#define RIGHTS_READ (1ULL << 1)
+#define RIGHTS_WRITE (1ULL << 2)
+#define RIGHTS_EXECUTE (1ULL << 3)
+#define RIGHTS_SPAWN (1ULL << 10)
+
+// fmode bits (linux/fs.h macros — not in vmlinux.h)
+#define FMODE_READ 1
+#define FMODE_WRITE 2
 
 // Per-task rights as task-local storage — keyed by the task struct
 // itself, updated from userspace via pidfd. Immune to pid namespaces:
@@ -149,6 +157,50 @@ int BPF_PROG(axiom_socket_sendmsg, struct socket *sock,
     if (fam != AF_INET && fam != AF_INET6)
         return 0;
     return gate(4, RIGHTS_NET, fam);
+}
+
+// Non-network classes are scoped to GOVERNED tasks: a task_rights entry
+// (even 0x0) marks the task as a subject of this monitor; tasks without
+// one are not governed and pass free. Denying file opens or exec for
+// every unlisted task would brick the host — the egress gate is host
+// policy, but file/exec gates are per-subject, like the kernel's model.
+static __always_inline int governed_gate(__u32 hook, __u64 need, __u64 arg)
+{
+    __u64 *r = bpf_task_storage_get(&task_rights, bpf_get_current_task_btf(), 0, 0);
+    if (!r)
+        return 0;
+    return gate(hook, need, arg);
+}
+
+// open(2): READ/WRITE by open mode. arg = fmode.
+SEC("lsm/file_open")
+int BPF_PROG(axiom_file_open, struct file *file)
+{
+    __u32 mode = file->f_mode;
+    __u64 need = 0;
+    if (mode & FMODE_READ)
+        need |= RIGHTS_READ;
+    if (mode & FMODE_WRITE)
+        need |= RIGHTS_WRITE;
+    if (!need)
+        return 0;
+    return governed_gate(5, need, mode);
+}
+
+// mmap(2): memory is allocated authority, not a side effect. arg = prot.
+SEC("lsm/mmap_file")
+int BPF_PROG(axiom_mmap, struct file *file, unsigned long reqprot,
+             unsigned long prot, unsigned long flags)
+{
+    return governed_gate(6, RIGHTS_ALLOC, prot);
+}
+
+// execve(2): running a different program is the EXECUTE right. fork is
+// not gated — a forked child IS the parent (task_alloc copies the mask).
+SEC("lsm/bprm_check_security")
+int BPF_PROG(axiom_bprm, struct linux_binprm *bprm)
+{
+    return governed_gate(7, RIGHTS_EXECUTE, 0);
 }
 
 char LICENSE[] SEC("license") = "GPL";

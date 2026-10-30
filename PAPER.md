@@ -4,7 +4,7 @@ Jon Halstead
 Independent — Boyne Falls, Michigan
 warheart1984-ctrl
 
-*v0.5 — v0.2 added threat model and scope corrections; v0.4 the signed-evidence daemon; v0.5 closes the SCM_RIGHTS bypass*
+*v0.6 — v0.2 added threat model and scope corrections; v0.4 the signed-evidence daemon; v0.5 closed the SCM_RIGHTS bypass; v0.6 adds governed-scoped file/mmap/exec gates*
 
 ## Abstract
 
@@ -70,6 +70,7 @@ The kernel exercised the model — which invariants hold, which mechanisms leak 
 ### 2.3 axiom-lsm (the port)
 
 - `lsm/socket_create`, `lsm/socket_connect`, `lsm/socket_sendmsg` programs: gate `AF_INET`/`AF_INET6` only — local IPC (`AF_UNIX`, `AF_NETLINK`) passes free. Lesson learned the hard way: gating local sockets breaks `sudo`'s audit channel and locks out the operator. Creation is gated *and* action is gated, so a passed fd confers nothing.
+- `lsm/file_open` (hook 5): `READ`/`WRITE` rights by `f_mode`. `lsm/mmap_file` (hook 6): `ALLOC`. `lsm/bprm_check_security` (hook 7): `EXECUTE`. These are **governed-scoped**: they apply only to tasks holding a `task_rights` entry (any entry, even `0x0` — i.e., spawned under `run`/`grant` and their descendants). Denying file opens or exec for every unlisted task would brick the host — the egress gate is host policy; file/exec gates are per-subject, matching the kernel's model.
 - `task_rights` is `BPF_MAP_TYPE_TASK_STORAGE`: per-task-struct storage updated from userspace via `pidfd`. Chosen after PID namespaces made tgid-keyed maps unreliable (§4.3).
 - `lsm/task_alloc` hook: copies the parent's rights to the child's task storage at fork. This is a **plain copy bounded above by the parent** — a child can never hold rights the parent lacked, so no amplification is possible. It is *not* yet the kernel's stronger model: Axiom-X requires `DELEGATE` to grant a nonempty mask and supports narrowing at spawn; the LSM's inheritance neither narrows nor checks `DELEGATE`. The weaker form is intentional for v0 (it matches POSIX fork semantics — a forked child *is* the parent); attenuation-by-narrowing belongs to the spawn/delegation API in future work.
 - Ring-buffer audit stream: every decision emits `{tgid, rights, arg, hook, kind}` where kind ∈ {ALLOW, DENY, INHERIT}.
@@ -128,6 +129,10 @@ Anderson's reference monitor requires three properties. We claim each only to th
 | Non-INET sockets | unaffected | `sudo` and local IPC unaffected |
 | LSM decisions become signed evidence | `record` daemon → v3 image → `ledger-tool verify` | `hash chain: internally consistent from genesis`; `checkpoint signature: Valid`; `8 signed checkpoints verified`; `PASS: 12 records verified from genesis (2 denies)` |
 | `SCM_RIGHTS` bypass attempt | `-EPERM` at `connect` on the passed fd | `[audit] tgid 6324 rights 0x0 hook 3 arg 2304 -> DENY`; `denied: [Errno 1] Operation not permitted` |
+| Governed task, full mask (`0x1042E`) | functions normally | `governed python ok`; hook 5/6 ALLOWs across ~550 file opens+mmaps |
+| Governed task missing `WRITE` (`0x1042A`) | write-open denied, reads allowed | `PermissionError ... '/tmp/axw'`; `[audit] tgid 6622 rights 0x1042a hook 5 -> DENY` |
+| Governed task missing `EXECUTE` (`0x10426`) | `execve` denied | `[audit] tgid 6624 rights 0x10426 hook 7 -> DENY`; `run` exits nonzero |
+| Ungoverned task | unaffected | opens/exec/sockets-on-INET pass free by scoping (except INET which is host policy) |
 
 ### 4.3 The honest frictions (debugging as evidence)
 
@@ -146,8 +151,9 @@ Anderson's reference monitor requires three properties. We claim each only to th
 ### 4.4 What is *not* yet proven
 
 - Records are durable only after a checkpoint: a daemon killed mid-window loses its un-checkpointed tail (provisional records are dropped on resume — by design, matching the kernel's signed-prefix semantics).
+- `file_open` denies the *open*; the inode itself is created before the hook runs — an empty file remains after a denied `O_CREAT` (inode creation is a separate hook, unmediated).
 - Receive-side paths (`bind`/`accept`/`recvmsg`) are unmediated (§3) — egress is governed, listening is not yet.
-- Non-network classes are unmediated: `execve`, `open`, `mmap`, `ptrace` are unmediated.
+- `ptrace` is unmediated, and non-network classes apply only to governed tasks — an unlisted task is not a subject of this monitor (by scoping design, §2.3/§3).
 - Tamperproofness against root/`CAP_BPF` is not claimed (§3).
 - Inheritance is a copy, not a narrowing delegation (§2.3); `DELEGATE` is not ported.
 - Enforcement is system-wide while attached; there is no cgroup/label scoping (§3).
@@ -174,7 +180,7 @@ Anderson's reference monitor requires three properties. We claim each only to th
 ## 7 Future Work
 
 - **Receive-side coverage**: `bind`/`accept`/`recvmsg` if inbound mediation is wanted.
-- **Hook coverage**: `file_open` (READ/WRITE), `mmap` (ALLOC), `bprm_check` (EXEC), `ptrace`.
+- **`ptrace`** mediation and inode-level gates (`inode_create`, `mknod`) for create-side control.
 - **Scoped enforcement**: bind the gate to a cgroup or label set rather than system-wide.
 - **Delegation narrowing on the LSM**: port the `DELEGATE` check and spawn-time mask attenuation.
 - **Remote anchoring**: move `ledger-anchor` to storage the disk-writer cannot reach.

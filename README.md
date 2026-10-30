@@ -9,6 +9,12 @@ values as `axiom-x-capability`, `1 << 16`). Every governed call — denials
 *and* grants — emits an audit event to a ring buffer; the asking IS the
 audit trail.
 
+Two scopes, deliberately different: **network egress is host policy** —
+every task needs `Rights::NET` for INET sockets while attached.
+**file_open / mmap / exec are governed-scoped** — they apply only to
+tasks holding a rights entry (spawned under `run`/`grant` + descendants);
+ungoverned tasks are not subjects of this monitor and pass free.
+
 ## Requirements
 
 - Kernel with `CONFIG_BPF_LSM=y` and `bpf` in the LSM list
@@ -28,6 +34,12 @@ sudo ./axiom-lsm grant <tgid> 0x10000         # grant Rights::NET to a task
 sudo ./axiom-lsm run 0x10000 curl example.com # spawn a governed task
 sudo ./axiom-lsm detach                       # unload everything
 ```
+
+Rights bits (shared with `axiom-x-capability`): `READ 0x2`, `WRITE 0x4`,
+`EXECUTE 0x8`, `ALLOC 0x20`, `SPAWN 0x400`, `NET 0x10000`. A governed
+task needs the right for each class it uses — e.g. `run 0x1042E` lets a
+program exec, read/write files, mmap, and use INET sockets; `run
+0x10000` gets a socket but fails its own `execve` (no `EXECUTE`).
 
 ## Signed evidence — `record`
 
@@ -74,8 +86,8 @@ durable — a daemon killed mid-window loses its un-checkpointed tail.
 | `socket_create` gate (Rights::NET) | `enforced` — DENY/ALLOW evidenced |
 | `socket_connect` + `socket_sendmsg` gates | `enforced` — passed-fd `connect` DENIED (hook 3, port audited) |
 | SCM_RIGHTS bypass | **closed** — mediation moved from creation to network action |
+| `file_open` (READ/WRITE), `mmap` (ALLOC), `bprm_check` (EXECUTE) | `enforced` — governed-scoped; DENY evidenced per class |
 | Rights inheritance on fork (`lsm/task_alloc`) | `enforced` — INHERIT→ALLOW observed |
-| Daemon signing events into AX ledger records | `enforced` — `ledger-tool verify` PASS on live capture |
-| Receive-side (bind/accept/recvmsg) | **open** — egress only by design, see PAPER §3 |
-| More hooks (open/mmap/exec/ptrace) | `roadmap` |
+| Daemon signing events into AX ledger records | `enforced` — `ledger-tool verify` PASS: 569 records, 7 denies, 12 signed checkpoints |
+| Receive-side (bind/accept/recvmsg), ptrace, inode-create | **open** — egress + governed classes only |
 | Root/CAP_BPF detachment | trusted operator by design (see PAPER §3) |

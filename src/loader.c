@@ -96,6 +96,12 @@ static int do_attach(void)
         fprintf(stderr, "warn: connect link pin failed\n");
     if (bpf_link__pin(skel->links.axiom_socket_sendmsg, PIN_DIR "/link-sendmsg"))
         fprintf(stderr, "warn: sendmsg link pin failed\n");
+    if (bpf_link__pin(skel->links.axiom_file_open, PIN_DIR "/link-file_open"))
+        fprintf(stderr, "warn: file_open link pin failed\n");
+    if (bpf_link__pin(skel->links.axiom_mmap, PIN_DIR "/link-mmap"))
+        fprintf(stderr, "warn: mmap link pin failed\n");
+    if (bpf_link__pin(skel->links.axiom_bprm, PIN_DIR "/link-bprm"))
+        fprintf(stderr, "warn: bprm link pin failed\n");
     fprintf(stderr, "[axiom-lsm] attached; pins in %s\n", PIN_DIR);
     lsm_bpf__destroy(skel); /* skeleton frees; pinned objs stay live */
     return 0;
@@ -107,6 +113,9 @@ static int do_detach(void)
     unlink(PIN_DIR "/link-fork");
     unlink(PIN_DIR "/link-connect");
     unlink(PIN_DIR "/link-sendmsg");
+    unlink(PIN_DIR "/link-file_open");
+    unlink(PIN_DIR "/link-mmap");
+    unlink(PIN_DIR "/link-bprm");
     unlink(PIN_DIR "/task_rights");
     unlink(PIN_DIR "/events");
     rmdir(PIN_DIR);
