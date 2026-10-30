@@ -88,6 +88,24 @@ durable — a daemon killed mid-window loses its un-checkpointed tail.
   own shell's pid into `cgroup.procs` — a governed shell can't even
   write the file that governs it (learned the hard way).
 
+## AACR — agent containment runtime
+
+`./aacr run --rights 0x1042E -- <any agent>` wraps the whole thing:
+scoped attach to `/sys/fs/cgroup/axaacr`, per-agent cgroup, signed
+recorder, grant+join+release, run, final checkpoint, evidence bundle
+(`evidence/runs/<ts>-<name>/` = `ledger.img` + `manifest.json` +
+`verify.txt` from the unmodified `ledger-tool`), cgroup teardown.
+
+```bash
+sudo ./aacr run --rights 0x0 -- /bin/echo hi          # fully locked: exit 127
+sudo ./aacr run --rights 0x42E -- python3 agent.py    # no NET: EPERM, signed
+```
+
+Agents cannot self-grant — `task_rights` is kernel task-storage; only
+the loader (map fd + pidfd) writes it, from the ungoverned parent.
+The containment contract is at the syscall boundary: framework,
+model, and language irrelevant.
+
 ## Status
 
 | Piece | State |

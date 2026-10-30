@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""AACR — Axiom Agent Containment Runtime.
+
+Runs ANY agent inside a governed cgroup whose every mediated action is
+denied by default and whose decisions are signed into an Axiom-X v3
+ledger. The contract is at the syscall boundary — the agent's framework,
+model, and language are irrelevant.
+
+  sudo ./aacr run --rights 0x1042E -- python3 agent.py
+  sudo ./aacr run --rights 0x0 -- /bin/echo hi      # fully locked demo
+
+Flow: ensure attach scoped to /sys/fs/cgroup/axaacr -> create per-agent
+cgroup -> spawn signed recorder -> grant+join child -> run -> final
+checkpoint -> evidence bundle (ledger img + manifest.json + verify.txt)
+-> teardown cgroup.
+
+Env: AXLSM=path to ./axiom-lsm binary (default: alongside this script)
+     LEDGER_TOOL=cmd prefix for verification, e.g.
+       "cd /mnt/g/Axiom-X && cargo run -q -p axiom-x-ledger-tool --"
+     AX_KEY=hex pubkey for verify (auto-read from ledger identity if unset)
+"""
+import argparse
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+AXLSM = os.environ.get("AXLSM", os.path.join(HERE, "axiom-lsm"))
+SCOPE_ROOT = "/sys/fs/cgroup/axaacr"
+PIN_CHECK = "/sys/fs/bpf/axiom-lsm/task_rights"
+LEDGER_TOOL = os.environ.get(
+    "LEDGER_TOOL",
+    "cd /mnt/g/Axiom-X && cargo run -q -p axiom-x-ledger-tool --")
+VERIFY_EXE = os.environ.get(
+    "VERIFY_EXE", "/mnt/g/Axiom-X/target/debug/ledger-tool.exe")
+AX_KEY = os.environ.get("AX_KEY", "")
+
+
+def wpath(p):
+    """WSL path -> Windows path for the ledger-tool.exe fallback."""
+    return subprocess.run(["wslpath", "-w", p],
+                          capture_output=True, text=True).stdout.strip()
+
+
+def verify(img, key):
+    if os.path.exists(VERIFY_EXE):
+        return subprocess.run([VERIFY_EXE, "verify", wpath(img), key],
+                              capture_output=True, text=True)
+    return subprocess.run(f"{LEDGER_TOOL} verify {img} {key}",
+                          shell=True, capture_output=True, text=True)
+
+
+def sh(*a, check=True, **kw):
+    return subprocess.run(a, check=check, **kw)
+
+
+def ensure_attached():
+    os.makedirs(SCOPE_ROOT, exist_ok=True)
+    if not os.path.exists(PIN_CHECK):
+        sh(AXLSM, "attach", SCOPE_ROOT, check=True)
+    else:
+        print("[aacr] axiom-lsm already attached — scoped mode assumed")
+
+
+def read_key(img):
+    """Ledger identity pubkey at sector 259, offset 40 (AXIDENT1)."""
+    if AX_KEY:
+        return AX_KEY
+    with open(img, "rb") as f:
+        f.seek(259 * 512 + 40)
+        return f.read(32).hex()
+
+
+def run_one(args):
+    name = args.name or f"agent-{os.getpid()}-{int(time.time())}"
+    cg = os.path.join(SCOPE_ROOT, name)
+    outdir = os.path.join(HERE, "evidence", "runs",
+                          time.strftime("%Y%m%d-%H%M%S-") + name)
+    img = args.ledger or os.path.join(outdir, "ledger.img")
+    os.makedirs(outdir, exist_ok=True)
+
+    ensure_attached()
+    os.makedirs(cg, exist_ok=True)
+
+    # recorder drains the ringbuf into the signed v3 ledger for the run
+    rec = subprocess.Popen([AXLSM, "record", img, "8"],
+                           stdout=open(os.devnull, "w"), stderr=subprocess.STDOUT)
+    time.sleep(1)  # recorder must provision the img before a fast exit
+    env = dict(os.environ, AXIOM_CGROUP=cg)
+    t0 = time.time()
+    proc = subprocess.run([AXLSM, "run", args.rights] + args.cmd, env=env)
+    dt = time.time() - t0
+
+    rec.send_signal(signal.SIGINT)
+    rec.wait(timeout=15)
+
+    manifest = {
+        "name": name, "cmd": args.cmd, "rights": args.rights,
+        "exit": proc.returncode, "seconds": round(dt, 2),
+        "cgroup": cg, "ledger": img,
+        "pubkey": read_key(img) if os.path.exists(img) else None,
+        "note": "evidence = signed v3 ledger; verify with axiom-x-ledger-tool",
+    }
+    with open(os.path.join(outdir, "manifest.json"), "w") as f:
+        json.dump(manifest, f, indent=2)
+
+    key = manifest["pubkey"]
+    if key:
+        v = verify(img, key)
+        with open(os.path.join(outdir, "verify.txt"), "w") as f:
+            f.write(v.stdout + v.stderr)
+        for line in (v.stdout + v.stderr).splitlines():
+            if "PASS" in line or "FAIL" in line:
+                print(f"[aacr] {line.strip()}")
+
+    try:
+        os.rmdir(cg)
+    except OSError:
+        print(f"[aacr] warn: {cg} not empty (descendants survived); left in place")
+    print(f"[aacr] exit={proc.returncode} evidence={outdir}")
+    return proc.returncode
+
+
+def main():
+    p = argparse.ArgumentParser(prog="aacr")
+    sub = p.add_subparsers(dest="op", required=True)
+    r = sub.add_parser("run", help="run an agent inside a governed cgroup")
+    r.add_argument("--rights", default="0x0", help="hex rights mask")
+    r.add_argument("--name", help="run name (default: generated)")
+    r.add_argument("--ledger", help="ledger img path (default: per-run)")
+    r.add_argument("cmd", nargs=argparse.REMAINDER)
+    a = p.parse_args()
+    if a.op == "run":
+        if a.cmd and a.cmd[0] == "--":
+            a.cmd = a.cmd[1:]
+        if not a.cmd:
+            p.error("run requires a command after --")
+        sys.exit(run_one(a))
+
+
+if __name__ == "__main__":
+    main()
